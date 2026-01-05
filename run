@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+import argparse
+import subprocess
+import sys
+import os
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent.resolve()
+TEST_OUT = SCRIPT_DIR / "output" / "testing"
+
+
+# ##################################################################
+# run command
+# execute a shell command and return exit code
+def run_command(cmd: list[str]) -> int:
+    return subprocess.call(cmd)
+
+
+# ##################################################################
+# command deploy
+# deploy app to ios device
+def command_deploy(args: argparse.Namespace) -> int:
+    project = args.project or os.environ.get("APP_PUBLISH_PROJECT") or os.getcwd()
+    device = args.device or "Starbuck"
+    return run_command([
+        sys.executable,
+        str(SCRIPT_DIR / "src" / "app_publish.py"),
+        project,
+        "--deploy",
+        device,
+    ])
+
+
+# ##################################################################
+# command status
+# show pipeline status
+def command_status(args: argparse.Namespace) -> int:
+    project = args.project or os.environ.get("APP_PUBLISH_PROJECT") or os.getcwd()
+    return run_command([
+        sys.executable,
+        str(SCRIPT_DIR / "src" / "app_publish.py"),
+        project,
+        "--status",
+    ])
+
+
+# ##################################################################
+# command restart
+# restart pipeline from beginning
+def command_restart(args: argparse.Namespace) -> int:
+    project = args.project or os.environ.get("APP_PUBLISH_PROJECT") or os.getcwd()
+    return run_command([
+        sys.executable,
+        str(SCRIPT_DIR / "src" / "app_publish.py"),
+        project,
+        "--restart",
+    ])
+
+
+# ##################################################################
+# command pipeline
+# run full publish pipeline
+def command_pipeline(args: argparse.Namespace) -> int:
+    project = args.project or os.environ.get("APP_PUBLISH_PROJECT") or os.getcwd()
+    return run_command([
+        sys.executable,
+        str(SCRIPT_DIR / "src" / "app_publish.py"),
+        project,
+    ])
+
+
+# ##################################################################
+# command step
+# run a specific pipeline step
+def command_step(args: argparse.Namespace) -> int:
+    project = args.project or os.environ.get("APP_PUBLISH_PROJECT") or os.getcwd()
+    return run_command([
+        sys.executable,
+        str(SCRIPT_DIR / "src" / "app_publish.py"),
+        project,
+        "--step",
+        args.step_name,
+    ])
+
+
+# ##################################################################
+# command test
+# run tests for a specific file
+def command_test(args: argparse.Namespace) -> int:
+    TEST_OUT.mkdir(parents=True, exist_ok=True)
+    target = args.target
+    log_name = target.replace("/", "_").replace("::", "_") + ".log"
+    log_path = TEST_OUT / log_name
+    result = run_command([
+        "pytest",
+        "-q",
+        target,
+        "--maxfail=1",
+        "--disable-warnings",
+    ])
+    return result
+
+
+# ##################################################################
+# command lint
+# run linter on codebase
+def command_lint(args: argparse.Namespace) -> int:
+    return run_command(["ruff", "check", "--line-length", "120", str(SCRIPT_DIR / "src")])
+
+
+# ##################################################################
+# command check
+# run full test suite and quality gates
+def command_check(args: argparse.Namespace) -> int:
+    return run_command(["dazpycheck"])
+
+
+# ##################################################################
+# main
+# parse arguments and dispatch to appropriate command
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        description="app-publish - iOS App Store publishing automation",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--project",
+        "-p",
+        help="Project directory (default: APP_PUBLISH_PROJECT env var or cwd)",
+    )
+
+    sub = parser.add_subparsers(dest="cmd")
+
+    # pipeline (default)
+    p_pipeline = sub.add_parser("pipeline", help="Run full publish pipeline")
+    p_pipeline.set_defaults(func=command_pipeline)
+
+    # deploy
+    p_deploy = sub.add_parser("deploy", help="Deploy to iOS device")
+    p_deploy.add_argument("device", nargs="?", default="Starbuck", help="Device name")
+    p_deploy.set_defaults(func=command_deploy)
+
+    # status
+    p_status = sub.add_parser("status", help="Show pipeline status")
+    p_status.set_defaults(func=command_status)
+
+    # restart
+    p_restart = sub.add_parser("restart", help="Restart pipeline from beginning")
+    p_restart.set_defaults(func=command_restart)
+
+    # step
+    p_step = sub.add_parser("step", help="Run a specific pipeline step")
+    p_step.add_argument("step_name", help="Step name (e.g., detect, build, upload)")
+    p_step.set_defaults(func=command_step)
+
+    # test
+    p_test = sub.add_parser("test", help="Run tests for a specific file")
+    p_test.add_argument("target", help="Test target (e.g., src/config_test.py)")
+    p_test.set_defaults(func=command_test)
+
+    # lint
+    p_lint = sub.add_parser("lint", help="Run linter")
+    p_lint.set_defaults(func=command_lint)
+
+    # check
+    p_check = sub.add_parser("check", help="Run full test suite and gates (dazpycheck)")
+    p_check.set_defaults(func=command_check)
+
+    args = parser.parse_args(argv)
+
+    # default to pipeline if no subcommand
+    if args.cmd is None:
+        args.func = command_pipeline
+
+    return args.func(args)
+
+
+# ##################################################################
+# entry point
+# standard python pattern for dispatching main
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
