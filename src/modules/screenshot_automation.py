@@ -14,46 +14,8 @@ from utils import (
     run as exec_cmd,
     ensure_dir,
 )
-
-
-# Screenshot scenarios for a Bridge card game app
-BRIDGE_SCENARIOS = [
-    {
-        "name": "01_title",
-        "description": "Title screen with game logo",
-        "js_setup": None,  # Already at title on launch
-        "wait": 1,
-        "priority": 1
-    },
-    {
-        "name": "02_game_start",
-        "description": "Game selector with seed controls",
-        "js_setup": "window.startGame && window.startGame()",
-        "wait": 2,
-        "priority": 1
-    },
-    {
-        "name": "03_bidding",
-        "description": "Bidding phase with auction table",
-        "js_setup": None,  # Auto-progresses from start
-        "wait": 3,
-        "priority": 1
-    },
-    {
-        "name": "04_gameplay",
-        "description": "Card play with cards on table",
-        "js_setup": None,  # Need to complete bidding first
-        "wait": 3,
-        "priority": 1
-    },
-    {
-        "name": "05_results",
-        "description": "Hand results screen",
-        "js_setup": None,
-        "wait": 2,
-        "priority": 1
-    },
-]
+from state import load_state, save_state
+from modules.screenshots import analyze_screenshot_scenarios
 
 # Required device screenshots
 DEVICES = [
@@ -62,6 +24,16 @@ DEVICES = [
     {"name": "iPad Pro 13-inch (M4)", "suffix": "ipad129", "size": "12.9 inch"},
     {"name": "iPad Pro 11-inch (M4)", "suffix": "ipad11", "size": "11 inch"},
 ]
+
+
+# ##################################################################
+# get scenarios
+# load screenshot scenarios from project state (or analyze if not cached)
+def get_scenarios(project_path: Path) -> list[dict]:
+    state = load_state(project_path)
+    scenarios = analyze_screenshot_scenarios(project_path, state)
+    save_state(project_path, state)  # Cache for future runs
+    return scenarios
 
 
 # ##################################################################
@@ -140,22 +112,28 @@ def click_simulator(device_name: str, x: int, y: int) -> bool:
 
 
 # ##################################################################
-# capture title screen
-# capture title screen for a device
-def capture_title_screen(device: dict, screenshot_dir: Path, bundle_id: str, app_path: Path) -> bool:
+# capture scenario
+# capture a specific scenario on a device
+def capture_scenario(device: dict, scenario: dict, screenshot_dir: Path, bundle_id: str, app_path: Path) -> bool:
     device_name = device["name"]
     suffix = device["suffix"]
+    scenario_name = scenario["name"]
+    description = scenario.get("description", scenario_name)
 
-    print_info(f"Capturing title screen on {device_name}...")
+    print_info(f"Capturing {scenario_name} on {device_name}...")
+    print_info(f"  Description: {description}")
 
     # Boot, install, launch
     boot_simulator(device_name)
     install_app(device_name, app_path)
     launch_app(device_name, bundle_id)
-    time.sleep(3)  # Wait for app to fully load
+
+    # Wait for app to load (first scenario) or navigate (subsequent scenarios)
+    wait_time = scenario.get("wait", 3)
+    time.sleep(wait_time)
 
     # Capture
-    output_path = screenshot_dir / f"01_title_{suffix}.png"
+    output_path = screenshot_dir / f"{scenario_name}_{suffix}.png"
     if capture_screenshot(device_name, output_path):
         print_success(f"Captured: {output_path.name}")
         return True
@@ -165,17 +143,28 @@ def capture_title_screen(device: dict, screenshot_dir: Path, bundle_id: str, app
 
 
 # ##################################################################
+# capture all scenarios on device
+# capture all scenarios on a single device
+def capture_all_scenarios_on_device(device: dict, scenarios: list[dict], screenshot_dir: Path, bundle_id: str, app_path: Path) -> int:
+    captured = 0
+    for scenario in scenarios:
+        if capture_scenario(device, scenario, screenshot_dir, bundle_id, app_path):
+            captured += 1
+    return captured
+
+
+# ##################################################################
 # capture all devices
-# capture screenshots on all required devices
-def capture_all_devices(project_path: Path, bundle_id: str, app_path: Path) -> int:
+# capture screenshots on all required devices for all scenarios
+def capture_all_devices(project_path: Path, bundle_id: str, app_path: Path, scenarios: list[dict]) -> int:
     screenshot_dir = project_path / "fastlane" / "screenshots" / "en-US"
     ensure_dir(screenshot_dir)
 
     captured = 0
 
     for device in DEVICES:
-        if capture_title_screen(device, screenshot_dir, bundle_id, app_path):
-            captured += 1
+        count = capture_all_scenarios_on_device(device, scenarios, screenshot_dir, bundle_id, app_path)
+        captured += count
 
     return captured
 
@@ -187,6 +176,12 @@ def capture_all_devices(project_path: Path, bundle_id: str, app_path: Path) -> i
 def run(project_path: Path, bundle_id: str, app_path: Path = None) -> bool:
     screenshot_dir = project_path / "fastlane" / "screenshots" / "en-US"
     ensure_dir(screenshot_dir)
+
+    # Get screenshot scenarios for this app (analyzed and cached in state)
+    scenarios = get_scenarios(project_path)
+    print_info(f"Found {len(scenarios)} screenshot scenarios:")
+    for s in scenarios:
+        print_info(f"  - {s['name']}: {s.get('description', '')}")
 
     # Find app if not provided
     if not app_path:
@@ -205,12 +200,13 @@ def run(project_path: Path, bundle_id: str, app_path: Path = None) -> bool:
     exec_cmd(["open", "-a", "Simulator"])
     time.sleep(1)
 
-    # Capture on all devices
-    captured = capture_all_devices(project_path, bundle_id, app_path)
+    # Capture on all devices for all scenarios
+    captured = capture_all_devices(project_path, bundle_id, app_path, scenarios)
 
-    print_success(f"Captured {captured} screenshots")
+    expected = len(DEVICES) * len(scenarios)
+    print_success(f"Captured {captured}/{expected} screenshots")
 
-    if captured < len(DEVICES):
+    if captured < expected:
         print_warning("Some screenshots failed. Check simulator setup.")
 
     # List what was captured
@@ -229,12 +225,17 @@ if __name__ == "__main__":
         sys.exit(1)
 
     project_path = Path(sys.argv[1]).resolve()
+
+    # Load bundle_id from state if not provided
+    state = load_state(project_path)
     if len(sys.argv) > 2:
         bundle_id = sys.argv[2]
+    elif state.bundle_id:
+        bundle_id = state.bundle_id
     else:
-        print_error("Bundle ID is required")
+        print_error("Bundle ID is required (not found in state)")
         sys.exit(1)
-        
+
     app_path = Path(sys.argv[3]) if len(sys.argv) > 3 else None
 
     success = run(project_path, bundle_id, app_path)

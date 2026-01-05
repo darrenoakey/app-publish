@@ -9,16 +9,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import print_info, print_success, print_warning, print_error, run as exec_cmd, ensure_dir
-from state import load_state
-
-# screenshots needed for app store
-SCREENSHOTS = [
-    ("01_title", "Title screen - shows 'CLICK TO START'"),
-    ("02_setup", "Setup screen - shows seed/deal options and PLAY button"),
-    ("03_bidding", "Bidding screen - shows bidding UI with cards visible"),
-    ("04_play", "Play screen - shows cards on table during play"),
-    ("05_trick", "Trick result - shows completed trick with cards"),
-]
+from state import load_state, save_state
+from modules.screenshots import analyze_screenshot_scenarios
 
 # device configurations
 DEVICES = [
@@ -63,7 +55,7 @@ def wait_for_enter(message: str) -> None:
 # ##################################################################
 # capture device screenshots
 # capture all screenshots for one device with user guidance
-def capture_device_screenshots(device: dict, output_dir: Path, bundle_id: str) -> int:
+def capture_device_screenshots(device: dict, output_dir: Path, bundle_id: str, screenshots: list[dict]) -> int:
     device_name = device["name"]
     prefix = device["prefix"]
     captured = 0
@@ -91,11 +83,16 @@ def capture_device_screenshots(device: dict, output_dir: Path, bundle_id: str) -
     print_info("Follow the prompts below to capture each screenshot.")
     print_info("="*60)
 
-    for screenshot_name, description in SCREENSHOTS:
+    for scenario in screenshots:
+        screenshot_name = scenario["name"]
+        description = scenario["description"]
+        navigation = scenario.get("navigation", "")
+
         filename = f"{prefix}-{screenshot_name}.png"
         filepath = output_dir / filename
 
-        wait_for_enter(f"Navigate to: {description}\n    Then press ENTER to capture '{filename}'")
+        nav_hint = f"\n    Navigation: {navigation}" if navigation else ""
+        wait_for_enter(f"Navigate to: {description}{nav_hint}\n    Then press ENTER to capture '{filename}'")
 
         if capture_screenshot(device_name, filepath):
             print_success(f"    Captured: {filename}")
@@ -130,8 +127,17 @@ def main() -> int:
     output_dir = project_path / "fastlane" / "screenshots" / "en-US"
     ensure_dir(output_dir)
 
+    # Analyze app to determine screenshot scenarios (cached in state)
+    print_info("Determining screenshot scenarios for this app...")
+    scenarios = analyze_screenshot_scenarios(project_path, state)
+    save_state(project_path, state)  # Save cached scenarios
+
+    print_info(f"\nScreenshots to capture ({len(scenarios)} scenarios):")
+    for i, scenario in enumerate(scenarios, 1):
+        print_info(f"  {i}. {scenario['name']}: {scenario['description']}")
+
     # remove old screenshots
-    print_info("Removing old screenshots...")
+    print_info("\nRemoving old screenshots...")
     for f in output_dir.glob("*.png"):
         f.unlink()
 
@@ -165,7 +171,7 @@ def main() -> int:
 
     for device in selected_devices:
         try:
-            count = capture_device_screenshots(device, output_dir, bundle_id)
+            count = capture_device_screenshots(device, output_dir, bundle_id, scenarios)
             total_captured += count
         except KeyboardInterrupt:
             print_warning("\nCapture interrupted by user")

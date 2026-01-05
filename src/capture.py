@@ -1,40 +1,46 @@
 #!/usr/bin/env python3
 # simple screenshot capture helper
 # usage:
-#     python capture.py title    - capture title screen
-#     python capture.py setup    - capture setup screen
-#     python capture.py bidding  - capture bidding screen
-#     python capture.py play     - capture play screen
-#     python capture.py trick    - capture trick screen
-#     python capture.py all      - interactive capture of all screens
+#     python capture.py <project_path> [screen_name|all]
+#     python capture.py /path/to/project 01_main    - capture specific screen
+#     python capture.py /path/to/project all        - interactive capture of all screens
+#     python capture.py /path/to/project            - list available screens
 import sys
 import subprocess
 from pathlib import Path
 
-DEVICE = "iPhone 16 Pro Max"
-OUTPUT_DIR = Path("./fastlane/screenshots/en-US")
+sys.path.insert(0, str(Path(__file__).parent))
+from state import load_state, save_state
+from modules.screenshots import analyze_screenshot_scenarios
 
-SCREENS = {
-    "title": "01_title",
-    "setup": "02_setup",
-    "bidding": "03_bidding",
-    "play": "04_play",
-    "trick": "05_trick",
-}
+DEVICE = "iPhone 16 Pro Max"
+
+
+# ##################################################################
+# get screens from state
+# load screenshot scenarios from project state (or analyze if not cached)
+def get_screens(project_path: Path) -> dict[str, dict]:
+    state = load_state(project_path)
+    scenarios = analyze_screenshot_scenarios(project_path, state)
+    save_state(project_path, state)  # Cache for future runs
+
+    # Convert to dict keyed by name for easy lookup
+    return {s["name"]: s for s in scenarios}
 
 
 # ##################################################################
 # capture
 # capture a screenshot from the simulator for the named screen
-def capture(name: str) -> bool:
-    if name not in SCREENS:
+def capture(project_path: Path, name: str, screens: dict) -> bool:
+    if name not in screens:
         print(f"Unknown screen: {name}")
-        print(f"Available: {', '.join(SCREENS.keys())}")
+        print(f"Available: {', '.join(screens.keys())}")
         return False
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"{DEVICE}-{SCREENS[name]}.png"
-    filepath = OUTPUT_DIR / filename
+    output_dir = project_path / "fastlane" / "screenshots" / "en-US"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{DEVICE}-{name}.png"
+    filepath = output_dir / filename
 
     result = subprocess.run(
         ["xcrun", "simctl", "io", DEVICE, "screenshot", str(filepath)],
@@ -52,15 +58,19 @@ def capture(name: str) -> bool:
 # ##################################################################
 # interactive all
 # interactively capture all screenshots by prompting user to navigate
-def interactive_all() -> None:
+def interactive_all(project_path: Path, screens: dict) -> None:
+    output_dir = project_path / "fastlane" / "screenshots" / "en-US"
     print("\n=== Interactive Screenshot Capture ===")
     print("Navigate to each screen in Simulator, then press Enter.\n")
 
-    for name, prefix in SCREENS.items():
-        input(f"Navigate to {name.upper()} screen, then press Enter: ")
-        capture(name)
+    for name, scenario in screens.items():
+        description = scenario.get("description", name)
+        navigation = scenario.get("navigation", "")
+        nav_hint = f" ({navigation})" if navigation else ""
+        input(f"Navigate to: {description}{nav_hint}\n  Press Enter to capture '{name}': ")
+        capture(project_path, name, screens)
 
-    print("\nDone! Screenshots saved to:", OUTPUT_DIR)
+    print(f"\nDone! Screenshots saved to: {output_dir}")
 
 
 # ##################################################################
@@ -68,19 +78,37 @@ def interactive_all() -> None:
 # parse command line and dispatch to appropriate capture function
 def main() -> int:
     if len(sys.argv) < 2:
-        print("Usage: python capture.py [title|setup|bidding|play|trick|all]")
+        print("Usage: python capture.py <project_path> [screen_name|all]")
+        print("  project_path: Path to the iOS project")
+        print("  screen_name: Name of specific screen to capture (optional)")
+        print("  all: Interactively capture all screens")
         return 1
 
-    cmd = sys.argv[1].lower()
+    project_path = Path(sys.argv[1]).resolve()
+    if not project_path.exists():
+        print(f"Project path does not exist: {project_path}")
+        return 1
+
+    screens = get_screens(project_path)
+
+    if len(sys.argv) < 3:
+        # List available screens
+        print(f"Available screens for {project_path.name}:")
+        for name, scenario in screens.items():
+            print(f"  {name}: {scenario.get('description', '')}")
+        print("\nUsage: python capture.py <project_path> [screen_name|all]")
+        return 0
+
+    cmd = sys.argv[2]
 
     if cmd == "all":
-        interactive_all()
+        interactive_all(project_path, screens)
         return 0
-    elif cmd in SCREENS:
-        return 0 if capture(cmd) else 1
+    elif cmd in screens:
+        return 0 if capture(project_path, cmd, screens) else 1
     else:
-        print(f"Unknown command: {cmd}")
-        print("Usage: python capture.py [title|setup|bidding|play|trick|all]")
+        print(f"Unknown screen: {cmd}")
+        print(f"Available: {', '.join(screens.keys())}")
         return 1
 
 

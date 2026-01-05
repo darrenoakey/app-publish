@@ -189,6 +189,79 @@ def detect_widget_extension(project_path: Path) -> dict:
 
 
 # ##################################################################
+# generate widget sample data
+# analyze widget source code and generate appropriate sample data using LLM
+def generate_widget_sample_data(project_path: Path, state: ProjectState, widget_info: dict) -> str:
+    # Read widget source files
+    widget_dir = widget_info.get("extension_dir")
+    if not widget_dir:
+        return _get_generic_widget_content()
+
+    widget_source = []
+    for swift_file in Path(widget_dir).glob("*.swift"):
+        try:
+            content = swift_file.read_text()
+            widget_source.append(f"// {swift_file.name}\n{content}")
+        except Exception:
+            continue
+
+    if not widget_source:
+        return _get_generic_widget_content()
+
+    combined_source = "\n\n".join(widget_source)[:30000]  # Limit token usage
+
+    prompt = f"""Analyze this iOS widget source code and generate Swift code that creates the widget view with realistic sample data.
+
+APP INFO:
+- Name: {state.app_name}
+- Description: {state.app_description[:300] if state.app_description else 'A widget app'}
+
+WIDGET SOURCE CODE:
+{combined_source}
+
+Generate ONLY the Swift code for the widgetContent computed property that instantiates the widget's entry view with sample data.
+The code should:
+1. Use the actual view name found in the source (e.g., WidgetEntryView, SharedWidgetView, etc.)
+2. Provide realistic sample data appropriate for this widget's purpose
+3. Include any helper functions needed (like generating sample history data)
+
+Respond with ONLY the Swift code, starting with:
+@ViewBuilder
+var widgetContent: some View {{
+"""
+
+    response = llm_chat(prompt)
+    if response and "@ViewBuilder" in response:
+        # Extract just the code
+        start = response.find("@ViewBuilder")
+        if start >= 0:
+            return response[start:]
+
+    return _get_generic_widget_content()
+
+
+# ##################################################################
+# get generic widget content
+# fallback generic widget content for unknown widget types
+def _get_generic_widget_content() -> str:
+    return '''@ViewBuilder
+    var widgetContent: some View {
+        // Generic widget placeholder - actual widget view could not be detected
+        VStack(spacing: 8) {
+            Image(systemName: "app.fill")
+                .font(.largeTitle)
+                .foregroundColor(.blue)
+            Text("Widget Preview")
+                .font(.headline)
+            Text("Sample Data")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding()
+    }'''
+
+
+# ##################################################################
 # create widget screenshot harness
 # create a swift file that renders the widget in a harness for screenshotting
 # creates a view that displays the widget at the correct size with sample data
@@ -203,6 +276,9 @@ def create_widget_screenshot_harness(project_path: Path, state: ProjectState, wi
         "systemLarge": (364, 382),
     }
     width, height = widget_sizes.get(widget_info.get("widget_family", "systemSmall"), (170, 170))
+
+    # Generate appropriate sample data for this widget
+    widget_content_code = generate_widget_sample_data(project_path, state, widget_info)
 
     harness_code = f'''import SwiftUI
 import UIKit
@@ -233,43 +309,7 @@ struct WidgetScreenshotHarness: View {{
         )
     }}
 
-    @ViewBuilder
-    var widgetContent: some View {{
-        // Try to use the app's widget view with sample data
-        if #available(iOS 17.0, *) {{
-            // Use SharedWidgetView or WidgetPreview if available
-            SharedWidgetView(
-                symbol: "AAPL",
-                companyName: "Apple Inc.",
-                price: 178.50,
-                priceCurrency: "USD",
-                portfolioValue: 17850,
-                portfolioCurrency: "USD",
-                history: generateSampleHistory(),
-                changeAmount: 3.25,
-                changePercent: 1.85,
-                fxRate: nil
-            )
-        }} else {{
-            Text("Widget Preview")
-                .font(.title)
-        }}
-    }}
-
-    func generateSampleHistory() -> [StockHistoryPoint] {{
-        let calendar = Calendar.current
-        var points: [StockHistoryPoint] = []
-        let basePrice = 175.0
-
-        for i in 0..<15 {{
-            let date = calendar.date(byAdding: .day, value: -14 + i, to: Date())!
-            let variation = Double.random(in: -3...5)
-            let close = basePrice + variation + Double(i) * 0.2
-            points.append(StockHistoryPoint(date: date, close: close))
-        }}
-
-        return points
-    }}
+    {widget_content_code}
 }}
 
 // Screenshot capture helper
@@ -886,43 +926,144 @@ def run_ui_tests_for_screenshots(project_path: Path, state: ProjectState, target
 
 
 # ##################################################################
-# generate screenshot scenarios
-# use ai to generate screenshot scenarios
-def generate_screenshot_scenarios(state: ProjectState) -> list[str]:
-    prompt = f"""For an iOS app called "{state.app_name}" with this description:
+# analyze screenshot scenarios
+# analyze app source code to determine canonical screenshots for this app
+# returns list of scenario dicts and saves to state.metadata for reuse
+def analyze_screenshot_scenarios(project_path: Path, state: ProjectState) -> list[dict]:
+    # Check if scenarios already cached in state
+    if state.metadata.get("screenshot_scenarios"):
+        print_info("Using cached screenshot scenarios from state")
+        return state.metadata["screenshot_scenarios"]
 
-{state.app_description[:500] if state.app_description else 'A mobile application'}
+    print_info("Analyzing app source code for screenshot scenarios...")
 
-Generate 5-6 screenshot scenarios that would showcase the app well on the App Store.
-Each scenario should be a short action like "Main screen with sample data" or "Settings menu open".
+    # Collect source files based on project type
+    source_content = []
 
-Respond with a simple numbered list, one scenario per line. No other text.
+    # Swift files for iOS apps
+    swift_files = list(project_path.glob("**/*.swift"))
+    # Exclude build artifacts and derived data
+    swift_files = [f for f in swift_files if not any(x in str(f) for x in [
+        ".build", "DerivedData", "Pods", ".xcodeproj", "WidgetScreenshotHarness"
+    ])]
+
+    # Web files for Capacitor/web apps
+    web_files = (
+        list(project_path.glob("**/*.html")) +
+        list(project_path.glob("**/*.tsx")) +
+        list(project_path.glob("**/*.vue")) +
+        list(project_path.glob("**/*.jsx"))
+    )
+    # Exclude node_modules and build artifacts
+    web_files = [f for f in web_files if not any(x in str(f) for x in [
+        "node_modules", "dist", "build", ".next"
+    ])]
+
+    all_files = swift_files + web_files
+
+    # Read source files (limit to avoid token overflow)
+    max_content_size = 50000  # ~50KB of source to analyze
+    current_size = 0
+
+    for source_file in all_files[:30]:  # Max 30 files
+        try:
+            content = source_file.read_text()
+            if current_size + len(content) > max_content_size:
+                # Truncate this file
+                content = content[:max_content_size - current_size]
+                source_content.append(f"\n--- {source_file.name} (truncated) ---\n{content}")
+                break
+            source_content.append(f"\n--- {source_file.name} ---\n{content}")
+            current_size += len(content)
+        except Exception:
+            continue
+
+    if not source_content:
+        print_warning("No source files found to analyze")
+        return _get_default_scenarios(state)
+
+    combined_source = "\n".join(source_content)
+
+    prompt = f"""Analyze this iOS/mobile app source code and determine the 5-6 most important screenshots to capture for the App Store.
+
+APP INFO:
+- Name: {state.app_name}
+- Description: {state.app_description[:500] if state.app_description else 'A mobile application'}
+
+SOURCE CODE:
+{combined_source}
+
+Based on the actual screens and features in this code, identify the most important screenshots.
+For each screenshot, provide:
+1. A short filename-safe name (e.g., "01_main", "02_gameplay", "03_results")
+2. A description of what the screenshot should show
+3. Navigation steps to reach that screen (if applicable)
+
+Respond in this exact JSON format (no other text):
+[
+  {{"name": "01_main", "description": "Main screen showing...", "navigation": "Launch app"}},
+  {{"name": "02_feature", "description": "...", "navigation": "..."}},
+  ...
+]
 """
+
     response = llm_chat(prompt)
     if not response:
-        return [
-            "App launch screen",
-            "Main interface",
-            "Key feature in action",
-            "Settings or preferences",
-            "Results or output view",
-        ]
+        return _get_default_scenarios(state)
 
-    # Parse response
-    scenarios = []
-    for line in response.split("\n"):
-        line = line.strip()
-        if line and (line[0].isdigit() or line.startswith("-")):
-            # Remove numbering
-            clean = line.lstrip("0123456789.-) ")
-            if clean:
-                scenarios.append(clean)
+    # Parse JSON response
+    import json
+    try:
+        # Find JSON array in response
+        start = response.find("[")
+        end = response.rfind("]") + 1
+        if start >= 0 and end > start:
+            scenarios = json.loads(response[start:end])
+            if scenarios and isinstance(scenarios, list):
+                # Validate structure
+                valid_scenarios = []
+                for s in scenarios[:6]:
+                    if isinstance(s, dict) and "name" in s and "description" in s:
+                        valid_scenarios.append({
+                            "name": s.get("name", ""),
+                            "description": s.get("description", ""),
+                            "navigation": s.get("navigation", ""),
+                            "priority": s.get("priority", 1)
+                        })
+                if valid_scenarios:
+                    # Cache in state
+                    state.metadata["screenshot_scenarios"] = valid_scenarios
+                    print_success(f"Identified {len(valid_scenarios)} screenshot scenarios")
+                    return valid_scenarios
+    except json.JSONDecodeError:
+        pass
 
-    return scenarios[:6] if scenarios else [
-        "Main screen",
-        "Feature demo",
-        "Settings",
+    print_warning("Could not parse LLM response, using defaults")
+    return _get_default_scenarios(state)
+
+
+# ##################################################################
+# get default scenarios
+# fallback scenarios when source analysis fails
+def _get_default_scenarios(state: ProjectState) -> list[dict]:
+    return [
+        {"name": "01_main", "description": "Main app screen", "navigation": "Launch app", "priority": 1},
+        {"name": "02_feature", "description": "Key feature in action", "navigation": "", "priority": 1},
+        {"name": "03_detail", "description": "Detail or result view", "navigation": "", "priority": 1},
+        {"name": "04_settings", "description": "Settings or preferences", "navigation": "", "priority": 2},
+        {"name": "05_about", "description": "About or info screen", "navigation": "", "priority": 2},
     ]
+
+
+# ##################################################################
+# generate screenshot scenarios
+# use ai to generate screenshot scenarios (wrapper for analyze_screenshot_scenarios)
+def generate_screenshot_scenarios(project_path: Path, state: ProjectState) -> list[str]:
+    # Use the full source analysis function
+    scenarios = analyze_screenshot_scenarios(project_path, state)
+
+    # Return just the descriptions for backward compatibility
+    return [s["description"] for s in scenarios]
 
 
 # ##################################################################
@@ -958,7 +1099,7 @@ def create_placeholder_screenshots(project_path: Path, state: ProjectState) -> b
     ensure_dir(screenshots_dir)
 
     # Create a README with instructions
-    scenarios = generate_screenshot_scenarios(state)
+    scenarios = generate_screenshot_scenarios(project_path, state)
 
     readme_content = f"""# Screenshots for {state.app_name}
 
@@ -985,7 +1126,7 @@ fastlane snapshot
 """
     write_file(screenshots_dir / "README.md", readme_content)
 
-    state.metadata["screenshot_scenarios"] = scenarios
+    # Note: scenarios are already cached in state.metadata by analyze_screenshot_scenarios
     print_success("Screenshot guide created in fastlane/screenshots/")
 
     return True
