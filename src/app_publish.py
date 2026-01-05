@@ -127,6 +127,15 @@ def run_pipeline(project_path: Path, force_restart: bool = False) -> bool:
         print_warning(f"Last error: {state.last_error}")
         print_info("Resuming from failed step...")
 
+    # steps that should always run fresh (never skip)
+    ALWAYS_RUN_FRESH = {"screenshots", "build"}
+
+    # clear completion status for steps that should always run fresh
+    for step in ALWAYS_RUN_FRESH:
+        if step in state.completed_steps:
+            state.completed_steps.remove(step)
+            save_state(project_path, state)
+
     # run each remaining step
     total_steps = len(PIPELINE_STEPS)
     for step in PIPELINE_STEPS:
