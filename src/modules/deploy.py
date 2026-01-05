@@ -23,6 +23,25 @@ from utils import (
 
 
 # ##################################################################
+# sync web content
+# syncs www/ to ios/App/App/public/ using capacitor
+# this MUST be called before building to ensure latest changes are deployed
+def sync_web_content(project_path: Path) -> bool:
+    print_info("Syncing web content to iOS...")
+    ret_code, output = exec_cmd(
+        ["npx", "cap", "sync", "ios"],
+        cwd=project_path,
+    )
+    if ret_code != 0:
+        print_warning(f"Capacitor sync warning: {output}")
+        # don't fail on warnings
+    return True
+# ##################################################################
+# sync web content
+# syncs www/ to ios/App/App/public/ using capacitor
+
+
+# ##################################################################
 # find connected devices
 # finds all connected ios devices
 def find_connected_devices() -> list[dict]:
@@ -207,6 +226,11 @@ def run(project_path: Path, state: ProjectState, device_name: str = "Starbuck") 
 
     device_id = device["id"]
     print_info(f"Deploying to: {device['name']}")
+
+    # Sync web content if web project
+    if state.project_type == "web":
+        if not sync_web_content(project_path):
+            return False
 
     # Build for device
     app_path = build_for_device(project_path, state)
