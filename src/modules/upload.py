@@ -100,6 +100,69 @@ def get_app_store_version(token: str, app_id: str) -> dict | None:
 # get the editable app store version (prepare_for_submission)
 
 
+def get_latest_app_store_version(token: str, app_id: str) -> dict | None:
+    result = api_request(
+        "GET",
+        f"apps/{app_id}/appStoreVersions?sort=-versionString&limit=1",
+        token
+    )
+    if result and result.get("data"):
+        return result["data"][0]
+    return None
+# ##################################################################
+# get latest app store version
+# get the most recent app store version regardless of state
+
+
+def increment_version(version_string: str) -> str:
+    parts = version_string.split(".")
+    if len(parts) == 1:
+        # 1 -> 1.1
+        return f"{parts[0]}.1"
+    elif len(parts) == 2:
+        # 1.0 -> 1.1
+        minor = int(parts[1]) + 1
+        return f"{parts[0]}.{minor}"
+    else:
+        # 1.0.0 -> 1.0.1
+        patch = int(parts[2]) + 1
+        return f"{parts[0]}.{parts[1]}.{patch}"
+# ##################################################################
+# increment version
+# increment a version string (1.0 -> 1.1, 1.0.0 -> 1.0.1)
+
+
+def create_app_store_version(token: str, app_id: str, version_string: str, platform: str = "IOS") -> dict | None:
+    print_info(f"Creating new App Store version: {version_string}")
+
+    data = {
+        "data": {
+            "type": "appStoreVersions",
+            "attributes": {
+                "versionString": version_string,
+                "platform": platform
+            },
+            "relationships": {
+                "app": {
+                    "data": {
+                        "type": "apps",
+                        "id": app_id
+                    }
+                }
+            }
+        }
+    }
+
+    result = api_request("POST", "appStoreVersions", token, data)
+    if result and result.get("data"):
+        print_success(f"Created App Store version {version_string}")
+        return result["data"]
+    return None
+# ##################################################################
+# create app store version
+# create a new app store version for the app
+
+
 def update_app_store_version(token: str, version_id: str, attributes: dict) -> bool:
     data = {
         "data": {
@@ -1250,14 +1313,31 @@ def run(project_path: Path, state: ProjectState) -> bool:
 
     print_info(f"Found app ID: {app_id}")
 
-    # get version
+    # get version (or create new one if app already published)
     version = get_app_store_version(token, app_id)
     if not version:
-        print_error("Could not find editable App Store version (PREPARE_FOR_SUBMISSION)")
-        return False
+        print_info("No editable version found - creating new version...")
+
+        # get latest version to determine next version number
+        latest = get_latest_app_store_version(token, app_id)
+        if latest:
+            current_version = latest["attributes"]["versionString"]
+            new_version = increment_version(current_version)
+            print_info(f"Latest version is {current_version}, creating {new_version}")
+        else:
+            new_version = "1.0"
+
+        # update state with new version
+        state.current_version = new_version
+
+        # create the new version
+        version = create_app_store_version(token, app_id, new_version)
+        if not version:
+            print_error("Failed to create new App Store version")
+            return False
 
     version_id = version["id"]
-    print_info(f"Found version ID: {version_id}")
+    print_info(f"Using version ID: {version_id}")
 
     # ensure latest build is selected
     ensure_build_selected(token, app_id, version_id)

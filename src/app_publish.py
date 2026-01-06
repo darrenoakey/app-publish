@@ -12,6 +12,8 @@ import setproctitle
 # add current directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+import hashlib
+
 from config import PIPELINE_STEPS
 from state import load_state, save_state, reset_state, ProjectState
 from utils import (
@@ -42,6 +44,29 @@ from modules import (
     submit,
     deploy,
 )
+
+
+# ##################################################################
+# compute www hash
+# compute a hash of all files in www/ directory for change detection
+def compute_www_hash(project_path: Path) -> str:
+    www_dir = project_path / "www"
+    if not www_dir.exists():
+        return ""
+
+    hasher = hashlib.md5()
+
+    # sort files for consistent ordering
+    for filepath in sorted(www_dir.rglob("*")):
+        if filepath.is_file():
+            # include relative path and file content in hash
+            rel_path = filepath.relative_to(www_dir)
+            hasher.update(str(rel_path).encode())
+            hasher.update(filepath.read_bytes())
+
+    return hasher.hexdigest()
+# ##################################################################
+# compute www hash
 
 
 # map step names to their modules
@@ -127,14 +152,21 @@ def run_pipeline(project_path: Path, force_restart: bool = False) -> bool:
         print_warning(f"Last error: {state.last_error}")
         print_info("Resuming from failed step...")
 
-    # steps that should always run fresh (never skip)
-    ALWAYS_RUN_FRESH = {"screenshots", "build"}
+    # check if www/ has changed since last build (for web projects)
+    if state.project_type == "web":
+        www_hash = compute_www_hash(project_path)
+        last_hash = state.metadata.get("www_hash")
 
-    # clear completion status for steps that should always run fresh
-    for step in ALWAYS_RUN_FRESH:
-        if step in state.completed_steps:
-            state.completed_steps.remove(step)
+        if www_hash != last_hash:
+            print_info("www/ content has changed - will rebuild and regenerate screenshots")
+            # clear build and screenshots so they run fresh
+            for step in ["build", "screenshots"]:
+                if step in state.completed_steps:
+                    state.completed_steps.remove(step)
+            state.metadata["www_hash"] = www_hash
             save_state(project_path, state)
+        else:
+            print_info("www/ content unchanged - skipping rebuild")
 
     # run each remaining step
     total_steps = len(PIPELINE_STEPS)
