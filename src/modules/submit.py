@@ -140,7 +140,7 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
     app_id = result["data"][0]["id"]
     print_info(f"App ID from API: {app_id}")
 
-    # Get the version in PREPARE_FOR_SUBMISSION state
+    # Get the version in PREPARE_FOR_SUBMISSION state that matches our version number
     result = api_request(
         "GET",
         f"apps/{app_id}/appStoreVersions?filter[appStoreState]=PREPARE_FOR_SUBMISSION",
@@ -159,9 +159,25 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
         print_error("No version ready for submission")
         return False
 
-    version_id = result["data"][0]["id"]
-    version_state = result["data"][0].get("attributes", {}).get("appStoreState", "UNKNOWN")
-    print_info(f"Found version ID: {version_id} (state: {version_state})")
+    # Find the version that matches state.current_version
+    target_version = state.current_version
+    version_data = None
+    for v in result["data"]:
+        v_string = v.get("attributes", {}).get("versionString", "")
+        if v_string == target_version:
+            version_data = v
+            break
+
+    if not version_data:
+        # Log what versions we found
+        found_versions = [v.get("attributes", {}).get("versionString", "?") for v in result["data"]]
+        print_error(f"Version {target_version} not found. Found versions: {found_versions}")
+        print_info("You may need to create this version in App Store Connect first")
+        return False
+
+    version_id = version_data["id"]
+    version_state = version_data.get("attributes", {}).get("appStoreState", "UNKNOWN")
+    print_info(f"Found version ID: {version_id} (version {target_version}, state: {version_state})")
 
     # Check if there are any issues with the version
     result = api_request("GET", f"appStoreVersions/{version_id}?include=appStoreVersionSubmission,build", token)
