@@ -103,11 +103,22 @@ def get_app_store_version(token: str, app_id: str) -> dict | None:
 def get_latest_app_store_version(token: str, app_id: str) -> dict | None:
     result = api_request(
         "GET",
-        f"apps/{app_id}/appStoreVersions?sort=-versionString&limit=1",
+        f"apps/{app_id}/appStoreVersions",
         token
     )
     if result and result.get("data"):
-        return result["data"][0]
+        # find the highest version number
+        versions = result["data"]
+        if not versions:
+            return None
+
+        def version_key(v):
+            vs = v["attributes"]["versionString"]
+            # convert "1.2.3" to tuple (1, 2, 3) for comparison
+            parts = vs.split(".")
+            return tuple(int(p) if p.isdigit() else 0 for p in parts)
+
+        return max(versions, key=version_key)
     return None
 # ##################################################################
 # get latest app store version
