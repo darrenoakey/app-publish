@@ -1146,32 +1146,13 @@ def run(project_path: Path, state: ProjectState) -> bool:
     # Detect if this is a widget app
     is_widget_app = "widget" in state.app_name.lower() or "widget" in (state.app_description or "").lower()
 
-    # Check if we already have screenshots
+    # Clear all existing screenshots to regenerate fresh
     existing_screenshots = list(screenshots_dir.glob("*.png")) + list(screenshots_dir.glob("*.jpg"))
     if existing_screenshots:
-        print_info(f"Found {len(existing_screenshots)} existing screenshots")
-
-        # Check for and remove duplicates
-        removed = remove_duplicate_screenshots(screenshots_dir)
-
-        # For widget apps, check if we have a widget screenshot
-        if is_widget_app:
-            remaining = list(screenshots_dir.glob("*.png"))
-            has_widget_shot = any("widget" in s.name.lower() for s in remaining)
-            if not has_widget_shot:
-                print_warning("Widget app but no widget screenshot found - will attempt to capture one")
-            else:
-                # We have screenshots including widget, we're good
-                return True
-
-        # If we still have enough unique screenshots, we're done
-        remaining = list(screenshots_dir.glob("*.png"))
-        if len(remaining) >= 3 and not is_widget_app:
-            return True
-
-        # Need more screenshots or widget shots
-        if removed > 0:
-            print_info("Need to regenerate screenshots after removing duplicates")
+        print_info(f"Clearing {len(existing_screenshots)} existing screenshots for fresh regeneration...")
+        for screenshot in existing_screenshots:
+            screenshot.unlink()
+        print_info("Old screenshots cleared")
 
     # Try using Claude Agent SDK to generate and run screenshot tests
     print_info("Attempting to generate screenshots with Claude Agent SDK...")
