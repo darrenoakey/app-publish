@@ -131,8 +131,8 @@ def main(argv: list[str]) -> int:
 
     sub = parser.add_subparsers(dest="cmd")
 
-    # pipeline (default)
-    p_pipeline = sub.add_parser("pipeline", help="Run full publish pipeline")
+    # pipeline / publish (default)
+    p_pipeline = sub.add_parser("pipeline", aliases=["publish"], help="Run full publish pipeline")
     p_pipeline.set_defaults(func=command_pipeline)
 
     # deploy
