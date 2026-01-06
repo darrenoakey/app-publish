@@ -19,7 +19,88 @@ from utils import (
     file_exists,
     dir_exists,
     read_file,
+    llm_chat,
 )
+
+
+# ##################################################################
+# get commits since last release
+# get all commit messages since the last release tag
+def get_commits_since_release(project_path: Path) -> list[str]:
+    # look for release tags (v1.0, release-1.0, etc)
+    ret_code, output = exec_cmd(
+        ["git", "tag", "--sort=-creatordate"],
+        cwd=project_path,
+    )
+
+    release_tag = None
+    if ret_code == 0 and output.strip():
+        tags = output.strip().split('\n')
+        for tag in tags:
+            # look for release tags
+            if tag.startswith('v') or tag.startswith('release') or tag.startswith('published'):
+                release_tag = tag
+                break
+
+    # get commits since tag (or all commits if no tag)
+    if release_tag:
+        print_info(f"Getting commits since release tag: {release_tag}")
+        cmd = ["git", "log", f"{release_tag}..HEAD", "--oneline", "--no-merges"]
+    else:
+        print_info("No release tag found - using recent commits")
+        cmd = ["git", "log", "-20", "--oneline", "--no-merges"]
+
+    ret_code, output = exec_cmd(cmd, cwd=project_path)
+    if ret_code != 0 or not output.strip():
+        return []
+
+    # extract just the commit messages (remove hash)
+    commits = []
+    for line in output.strip().split('\n'):
+        if ' ' in line:
+            commits.append(line.split(' ', 1)[1])
+
+    return commits
+# ##################################################################
+# get commits since last release
+
+
+# ##################################################################
+# generate whats new
+# use llm to generate user-friendly what's new from commits
+def generate_whats_new(commits: list[str], app_name: str) -> str:
+    if not commits:
+        return "Bug fixes and performance improvements."
+
+    commit_text = '\n'.join(f"- {c}" for c in commits)
+
+    prompt = f"""Based on these git commit messages for the app "{app_name}", write a very short "What's New"
+for the App Store. Rules:
+- Write 1-3 bullet points MAXIMUM (prefer just 1 if possible)
+- Focus ONLY on the most significant USER-FACING changes
+- Use simple, non-technical language (no programming terms)
+- Write for regular users, not developers
+- Each bullet should be under 100 characters
+- If the changes are mostly technical/internal, just say "Bug fixes and improvements"
+
+Commit messages:
+{commit_text}
+
+Respond with ONLY the bullet points, starting each with •"""
+
+    result = llm_chat(prompt)
+    if result:
+        # clean up the response
+        result = result.strip()
+        # ensure it starts with bullet points
+        if not result.startswith('•'):
+            lines = result.split('\n')
+            result = '\n'.join(f"• {line.lstrip('•-* ')}" for line in lines if line.strip())
+        return result
+
+    return "• Bug fixes and performance improvements"
+# ##################################################################
+# generate whats new
 
 
 def get_api_token() -> str:
@@ -673,6 +754,19 @@ def upload_metadata_for_locale(project_path: Path, state: ProjectState, token: s
                     print_info(f"  {field}: needs update")
                 else:
                     print_info(f"  {field}: up to date")
+
+    # generate what's new from git commits (for updates, not first release)
+    current_whats_new = current_attrs.get("whatsNew", "") or ""
+    if not current_whats_new or current_whats_new == "Bug fixes and performance improvements.":
+        print_info("Generating 'What's New' from git history...")
+        commits = get_commits_since_release(project_path)
+        if commits:
+            whats_new = generate_whats_new(commits, state.app_name)
+            print_info(f"Generated: {whats_new}")
+            updates["whatsNew"] = whats_new
+        else:
+            # no commits found, use default
+            updates["whatsNew"] = "• Bug fixes and performance improvements"
 
     # update version localization if needed
     if updates:

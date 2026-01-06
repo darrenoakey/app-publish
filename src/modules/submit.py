@@ -335,6 +335,44 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
 
 
 # ##################################################################
+# tag release
+# create a git tag for this release
+def tag_release(project_path: Path, state: ProjectState) -> bool:
+    tag_name = f"v{state.current_version}"
+    print_info(f"Creating release tag: {tag_name}")
+
+    ret_code, output = exec_cmd(
+        ["git", "tag", "-a", tag_name, "-m", f"Release {state.current_version} (build {state.current_build})"],
+        cwd=project_path,
+    )
+
+    if ret_code != 0:
+        # tag might already exist
+        if "already exists" in output.lower():
+            print_info(f"Tag {tag_name} already exists")
+            return True
+        print_warning(f"Failed to create tag: {output}")
+        return False
+
+    print_success(f"Created release tag: {tag_name}")
+
+    # push the tag
+    ret_code, output = exec_cmd(
+        ["git", "push", "origin", tag_name],
+        cwd=project_path,
+    )
+
+    if ret_code != 0:
+        print_warning(f"Failed to push tag (you can push manually): git push origin {tag_name}")
+    else:
+        print_success("Tag pushed to remote")
+
+    return True
+# ##################################################################
+# tag release
+
+
+# ##################################################################
 # run
 # runs submit step and submits the app for app store review
 def run(project_path: Path, state: ProjectState) -> bool:
@@ -353,6 +391,9 @@ def run(project_path: Path, state: ProjectState) -> bool:
 
     print_success("App is now waiting for Apple review")
     print_info("You'll receive an email when the review is complete")
+
+    # Tag this release in git
+    tag_release(project_path, state)
 
     return True
 # ##################################################################
