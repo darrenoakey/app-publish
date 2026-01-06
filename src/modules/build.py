@@ -207,6 +207,7 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
         "-archivePath", str(archive_path),
         "-destination", "generic/platform=iOS",
         "CURRENT_PROJECT_VERSION=" + str(state.current_build),
+        f"MARKETING_VERSION={state.current_version}",
         f"DEVELOPMENT_TEAM={TEAM_ID}",
         f"PRODUCT_BUNDLE_IDENTIFIER={state.bundle_id}",
         "CODE_SIGN_STYLE=Manual",

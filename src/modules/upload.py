@@ -126,21 +126,14 @@ def get_latest_app_store_version(token: str, app_id: str) -> dict | None:
 
 
 def increment_version(version_string: str) -> str:
+    # extract the major version number and increment it
+    # 1 -> 2, 1.0 -> 2, 1.0.0 -> 2
     parts = version_string.split(".")
-    if len(parts) == 1:
-        # 1 -> 1.1
-        return f"{parts[0]}.1"
-    elif len(parts) == 2:
-        # 1.0 -> 1.1
-        minor = int(parts[1]) + 1
-        return f"{parts[0]}.{minor}"
-    else:
-        # 1.0.0 -> 1.0.1
-        patch = int(parts[2]) + 1
-        return f"{parts[0]}.{parts[1]}.{patch}"
+    major = int(parts[0]) + 1
+    return str(major)
 # ##################################################################
 # increment version
-# increment a version string (1.0 -> 1.1, 1.0.0 -> 1.0.1)
+# increment version: 1 -> 2, 1.0 -> 2
 
 
 def create_app_store_version(token: str, app_id: str, version_string: str, platform: str = "IOS") -> dict | None:

@@ -47,6 +47,18 @@ from modules import (
 
 
 # ##################################################################
+# increment version
+# increment version: 1 -> 2, 1.0 -> 2, 1.0.0 -> 2
+def increment_version(version_string: str) -> str:
+    # extract the major version number and increment it
+    parts = version_string.split(".")
+    major = int(parts[0]) + 1
+    return str(major)
+# ##################################################################
+# increment version
+
+
+# ##################################################################
 # compute www hash
 # compute a hash of all files in www/ directory for change detection
 def compute_www_hash(project_path: Path) -> str:
@@ -159,10 +171,18 @@ def run_pipeline(project_path: Path, force_restart: bool = False) -> bool:
 
         if www_hash != last_hash:
             print_info("www/ content has changed - will rebuild and regenerate screenshots")
-            # clear build and screenshots so they run fresh
-            for step in ["build", "screenshots"]:
+
+            # if we've published before (upload completed), increment version
+            if "upload" in state.completed_steps:
+                old_version = state.current_version
+                state.current_version = increment_version(old_version)
+                print_info(f"Incrementing version: {old_version} -> {state.current_version}")
+
+            # clear build-related steps so they run fresh
+            for step in ["build", "screenshots", "upload", "submit"]:
                 if step in state.completed_steps:
                     state.completed_steps.remove(step)
+
             state.metadata["www_hash"] = www_hash
             save_state(project_path, state)
         else:
