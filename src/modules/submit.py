@@ -324,17 +324,16 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
 def run(project_path: Path, state: ProjectState) -> bool:
     # Wait for build to be processed
     if not wait_for_build_processing(state, max_wait_minutes=30):
-        print_warning("Skipping automatic submission - build may not be ready")
-        print_info("Submit manually from App Store Connect once build is processed")
-        # Don't fail - user can submit manually
-        return True
+        print_error("Build not ready for submission")
+        print_info("Check App Store Connect and retry when build is processed")
+        return False
 
     # Submit for review
     if not submit_for_review(project_path, state):
-        print_warning("Automatic submission failed")
-        print_info("Submit manually from: https://appstoreconnect.apple.com")
-        # Don't fail - user can submit manually
-        return True
+        print_error("Submission failed")
+        print_info("Fix the issue above and retry, or submit manually from:")
+        print_info("https://appstoreconnect.apple.com")
+        return False
 
     print_success("App is now waiting for Apple review")
     print_info("You'll receive an email when the review is complete")
