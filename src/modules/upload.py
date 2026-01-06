@@ -1317,31 +1317,36 @@ def run(project_path: Path, state: ProjectState) -> bool:
 
     print_info(f"Found app ID: {app_id}")
 
-    # get version (or create new one if app already published)
-    version = get_app_store_version(token, app_id)
+    # get version that matches state.current_version (or create it)
+    target_version = state.current_version
+    print_info(f"Looking for App Store version: {target_version}")
+
+    # check for existing PREPARE_FOR_SUBMISSION versions
+    version = None
+    all_versions = api_request(
+        "GET",
+        f"apps/{app_id}/appStoreVersions?filter[appStoreState]=PREPARE_FOR_SUBMISSION",
+        token
+    )
+    if all_versions and all_versions.get("data"):
+        for v in all_versions["data"]:
+            v_string = v.get("attributes", {}).get("versionString", "")
+            if v_string == target_version:
+                version = v
+                print_info(f"Found existing version {target_version}")
+                break
+            else:
+                print_info(f"Skipping version {v_string} (not {target_version})")
+
     if not version:
-        print_info("No editable version found - creating new version...")
-
-        # get latest version to determine next version number
-        latest = get_latest_app_store_version(token, app_id)
-        if latest:
-            current_version = latest["attributes"]["versionString"]
-            new_version = increment_version(current_version)
-            print_info(f"Latest version is {current_version}, creating {new_version}")
-        else:
-            new_version = "1.0"
-
-        # update state with new version
-        state.current_version = new_version
-
-        # create the new version
-        version = create_app_store_version(token, app_id, new_version)
+        print_info(f"Creating App Store version {target_version}...")
+        version = create_app_store_version(token, app_id, target_version)
         if not version:
-            print_error("Failed to create new App Store version")
+            print_error(f"Failed to create App Store version {target_version}")
             return False
 
     version_id = version["id"]
-    print_info(f"Using version ID: {version_id}")
+    print_info(f"Using version ID: {version_id} (version {target_version})")
 
     # ensure latest build is selected
     ensure_build_selected(token, app_id, version_id)
