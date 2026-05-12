@@ -5,7 +5,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState, load_state, save_state
-from config import TEAM_ID
+from config import TEAM_ID, API_KEY_ID, API_ISSUER_ID, API_KEY_PATH
 from utils import (
     print_info,
     print_success,
@@ -129,6 +129,9 @@ def create_export_options(project_path: Path, state: ProjectState) -> Path:
 
     # use 'app-store' method (not 'app-store-connect') to just create the ipa
     # without requiring app store connect authentication at build time
+    # Automatic signing — Xcode/xcodebuild uses the ASC API key (passed via
+    # -authenticationKey* on the exportArchive call) to fetch or create the
+    # appstore provisioning profile on the fly. NO fastlane match.
     content = f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -140,14 +143,9 @@ def create_export_options(project_path: Path, state: ProjectState) -> Path:
     <key>uploadSymbols</key>
     <true/>
     <key>signingStyle</key>
-    <string>manual</string>
-    <key>signingCertificate</key>
-    <string>Apple Distribution</string>
-    <key>provisioningProfiles</key>
-    <dict>
-        <key>{state.bundle_id}</key>
-        <string>match AppStore {state.bundle_id}</string>
-    </dict>
+    <string>automatic</string>
+    <key>destination</key>
+    <string>export</string>
 </dict>
 </plist>
 '''
@@ -201,18 +199,26 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
     else:
         archive_cmd.extend(["-project", xcode_project])
 
+    # Automatic signing + ASC API key — Xcode resolves the appstore
+    # provisioning profile via the developer portal at archive time.
+    # NO fastlane match. Ever.
+    auth_args = [
+        "-authenticationKeyID", API_KEY_ID or "",
+        "-authenticationKeyIssuerID", API_ISSUER_ID or "",
+        "-authenticationKeyPath", str(API_KEY_PATH),
+    ]
     archive_cmd.extend([
         "-scheme", scheme,
         "-configuration", "Release",
         "-archivePath", str(archive_path),
         "-destination", "generic/platform=iOS",
+        "-allowProvisioningUpdates",
+        *auth_args,
         "CURRENT_PROJECT_VERSION=" + str(state.current_build),
         f"MARKETING_VERSION={state.current_version}",
         f"DEVELOPMENT_TEAM={TEAM_ID}",
         f"PRODUCT_BUNDLE_IDENTIFIER={state.bundle_id}",
-        "CODE_SIGN_STYLE=Manual",
-        "CODE_SIGN_IDENTITY=Apple Distribution",
-        f"PROVISIONING_PROFILE_SPECIFIER=match AppStore {state.bundle_id}",
+        "CODE_SIGN_STYLE=Automatic",
         "archive",
     ])
 
@@ -236,46 +242,31 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
     ipa_path = None
     export_succeeded = False
 
-    # method 1: try fastlane gym
-    print_info("Exporting IPA for App Store using fastlane...")
-    gym_cmd = [
-        "fastlane", "gym",
-        "--skip_build_archive", "true",
-        "--archive_path", str(archive_path),
-        "--export_method", "app-store",
-        "--output_directory", str(export_path),
-        "--output_name", state.project_name,
-        "--export_team_id", TEAM_ID,
-    ]
+    # Export via xcodebuild -exportArchive with automatic signing + ASC API
+    # auth. Xcode fetches/creates the appstore provisioning profile inline.
+    # NO fastlane match. NO fastlane gym.
+    print_info("Exporting IPA via xcodebuild (automatic signing, ASC API)...")
+    export_options = create_export_options(project_path, state)
 
-    ret_code, output = exec_cmd(gym_cmd, cwd=project_path, timeout=300)
+    ret_code, output = exec_cmd([
+        "xcodebuild",
+        "-exportArchive",
+        "-archivePath", str(archive_path),
+        "-exportPath", str(export_path),
+        "-exportOptionsPlist", str(export_options),
+        "-allowProvisioningUpdates",
+        "-authenticationKeyID", API_KEY_ID or "",
+        "-authenticationKeyIssuerID", API_ISSUER_ID or "",
+        "-authenticationKeyPath", str(API_KEY_PATH),
+    ], timeout=300)
 
     if ret_code == 0:
         ipa_files = list(export_path.glob("*.ipa"))
         if ipa_files:
             ipa_path = ipa_files[0]
             export_succeeded = True
-
-    # method 2: try xcodebuild exportarchive
-    if not export_succeeded:
-        print_warning("Fastlane export failed, trying xcodebuild...")
-        export_options = create_export_options(project_path, state)
-
-        ret_code, output = exec_cmd([
-            "xcodebuild",
-            "-exportArchive",
-            "-archivePath", str(archive_path),
-            "-exportPath", str(export_path),
-            "-exportOptionsPlist", str(export_options),
-        ], timeout=300)
-
-        if ret_code == 0:
-            ipa_files = list(export_path.glob("*.ipa"))
-            if ipa_files:
-                ipa_path = ipa_files[0]
-                export_succeeded = True
-        else:
-            print_warning(f"xcodebuild export also failed: {output[:200]}...")
+    else:
+        print_warning(f"xcodebuild export failed: {output[:300]}...")
 
     # method 3: manual ipa creation (bypasses rsync issues)
     if not export_succeeded:

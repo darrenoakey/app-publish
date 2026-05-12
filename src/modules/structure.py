@@ -239,42 +239,21 @@ platform :ios do
     end
   end
 
-  desc "Sync certificates and profiles"
-  lane :match_sync do
-    match(
-      type: "appstore",
-      app_identifier: "{state.bundle_id}",
-      team_id: "{TEAM_ID}",
-      readonly: true
-    )
-  end
+  # NO MATCH. Signing uses automatic style + ASC API key. The actual
+  # archive/export is driven by app-publish's build.py via xcodebuild
+  # with -allowProvisioningUpdates + -authenticationKey*. Fastlane lanes
+  # below exist only for metadata/screenshot upload.
 
-  desc "Build for App Store"
-  lane :build do
-    increment_build_number(
-      xcodeproj: "{state.metadata.get('xcode_project', 'App.xcodeproj')}"
-    )
-
-    build_app(
-      scheme: "App",
-      export_method: "app-store",
-      export_options: {{
-        teamID: "{TEAM_ID}",
-        signingStyle: "manual",
-        provisioningProfiles: {{
-          "{state.bundle_id}" => "match AppStore {state.bundle_id}"
-        }}
-      }}
-    )
-  end
-
-  desc "Upload to App Store Connect"
-  lane :upload do
-    deliver(
-      skip_screenshots: true,
+  desc "Upload metadata + screenshots"
+  lane :upload_metadata do
+    upload_to_app_store(
+      api_key_path: "~/.appstoreconnect/api_key.json",
+      skip_binary_upload: true,
+      skip_screenshots: false,
       skip_metadata: false,
       force: true,
-      api_key_path: "~/.appstoreconnect/api_key.json"
+      precheck_include_in_app_purchases: false,
+      submit_for_review: false
     )
   end
 
@@ -282,26 +261,12 @@ platform :ios do
   lane :screenshots do
     capture_screenshots
   end
-
-  desc "Full release: build and upload"
-  lane :release do
-    match_sync
-    build
-    upload
-  end
 end
 '''
     write_file(fastlane_dir / "Fastfile", fastfile_content)
 
-    # Create Matchfile
-    matchfile_content = f'''# Matchfile
-git_url("https://github.com/{GITHUB_USER}/app_store_certificates")
-storage_mode("git")
-type("appstore")
-app_identifier("{state.bundle_id}")
-team_id("{TEAM_ID}")
-'''
-    write_file(fastlane_dir / "Matchfile", matchfile_content)
+    # NO MATCHFILE. We don't write one because we don't use fastlane match.
+    # Distribution cert + provisioning profile are managed via ASC API.
 
     # Create Snapfile - need to specify project/workspace path
     # For Capacitor projects, the workspace is in ios/App/

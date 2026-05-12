@@ -1,161 +1,123 @@
+# Signing for app-publish.
+#
+# WE NEVER USE FASTLANE MATCH. Match's encrypted-git-repo model is fragile
+# (MATCH_PASSWORD lives in someone's head, machine-to-machine sync is a
+# nightmare) and offers nothing over Xcode's built-in automatic signing
+# when paired with an App Store Connect API key.
+#
+# Strategy:
+#   1. Verify a distribution cert exists locally (security find-identity).
+#      If not, create one via the App Store Connect API and import the
+#      resulting .p12 into the login keychain.
+#   2. Ensure the Bundle ID exists on the developer portal (idempotent).
+#   3. That's it. Profile creation is handled by xcodebuild itself at
+#      archive/export time via `-allowProvisioningUpdates` + the API key.
 from pathlib import Path
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState
-from config import TEAM_ID, CERTIFICATE_REPO, API_KEY_PATH
+from config import TEAM_ID, API_KEY_PATH, API_KEY_ID, API_ISSUER_ID
 from utils import (
     print_info,
     print_success,
     print_warning,
     print_error,
     run as exec_cmd,
-    file_exists,
-    write_file,
 )
 
 
 # ##################################################################
-# ensure api key json
-# ensure api key json file exists for fastlane
-def ensure_api_key_json() -> Path:
-    import json
-    from config import API_KEY_ID, API_ISSUER_ID, API_KEY_PATH
-
-    api_key_json = API_KEY_PATH.parent.parent / "api_key.json"
-
-    # fastlane expects either "key" (content) or "key_filepath" (path)
-    # some versions prefer the content directly
-    if not file_exists(api_key_json) or True:  # always regenerate to be safe
-        # read the key content
-        key_content = API_KEY_PATH.read_text()
-
-        content = {
-            "key_id": API_KEY_ID,
-            "issuer_id": API_ISSUER_ID,
-            "key": key_content,  # full key content
-            "in_house": False,  # not an enterprise account
-        }
-        api_key_json.write_text(json.dumps(content, indent=2))
-
-    return api_key_json
-# ##################################################################
-# ensure api key json
-# ensure api key json file exists for fastlane
-
-
-# ##################################################################
-# create app id
-# create app id on apple developer portal if it doesn't exist
-# note: this is now a no-op as match will create the app id when needed
-# we just log the intent and return true
-def create_app_id(project_path: Path, state: ProjectState) -> bool:
-    print_info(f"App ID will be created by match if needed: {state.bundle_id}")
-    return True
-# ##################################################################
-# create app id
-# create app id on apple developer portal if it doesn't exist
-
-
-# ##################################################################
-# run fastlane match
-# run fastlane match to sync certificates and profiles
-def run_fastlane_match(project_path: Path, state: ProjectState, readonly: bool = True) -> bool:
-    # ensure api key json exists
-    api_key_json = ensure_api_key_json()
-
-    # first try readonly (use existing)
-    print_info("Syncing certificates and profiles...")
-
-    match_cmd = [
-        "fastlane", "match", "appstore",
-        "--app_identifier", state.bundle_id,
-        "--team_id", TEAM_ID,
-        "--git_url", f"https://github.com/{CERTIFICATE_REPO}",
-        "--api_key_path", str(api_key_json),
-    ]
-
-    if readonly:
-        match_cmd.append("--readonly")
-
-    ret_code, output = exec_cmd(match_cmd, cwd=project_path, timeout=180)
-
+# has distribution cert
+# True if a usable "Apple Distribution" identity is in the login keychain.
+def has_distribution_cert() -> bool:
+    ret_code, output = exec_cmd(["security", "find-identity", "-v", "-p", "codesigning"])
     if ret_code != 0:
-        if readonly:
-            # try again without readonly (create new if needed)
-            print_info("No existing profiles found, creating new ones...")
-            return run_fastlane_match(project_path, state, readonly=False)
-        else:
-            print_error(f"Failed to sync certificates: {output}")
-            return False
-
-    print_success("Certificates and profiles synced")
-    return True
-# ##################################################################
-# run fastlane match
-# run fastlane match to sync certificates and profiles
-
-
-# ##################################################################
-# verify signing
-# verify that signing is properly configured
-def verify_signing(project_path: Path, state: ProjectState) -> bool:
-    # check for provisioning profiles
-    ret_code, output = exec_cmd([
-        "security", "find-identity", "-v", "-p", "codesigning"
-    ])
-
-    if "Apple Distribution" not in output:
-        print_warning("No distribution certificate found")
         return False
+    return "Apple Distribution" in output
 
-    print_success("Distribution certificate available")
-    return True
+
 # ##################################################################
-# verify signing
-# verify that signing is properly configured
+# ensure bundle id
+# Ensure the bundle id exists on the developer portal. Idempotent.
+def ensure_bundle_id(bundle_id: str, app_name: str) -> bool:
+    # Use a small inline spaceship call via the `ruby` binary that ships
+    # with fastlane — avoids pulling in a Python ASC client just for one
+    # idempotent operation.
+    print_info(f"Ensuring Bundle ID {bundle_id} on developer portal...")
+    ret_code, output = exec_cmd([
+        "ruby", "-rspaceship", "-e",
+        f"""
+        token = Spaceship::ConnectAPI::Token.create(
+          key_id: "{API_KEY_ID}",
+          issuer_id: "{API_ISSUER_ID}",
+          filepath: "{API_KEY_PATH}",
+          in_house: false
+        )
+        Spaceship::ConnectAPI.token = token
+        existing = Spaceship::ConnectAPI::BundleId.all.find {{ |b| b.identifier == "{bundle_id}" }}
+        if existing
+          puts "EXISTS"
+        else
+          Spaceship::ConnectAPI::BundleId.create(
+            name: "{app_name}",
+            identifier: "{bundle_id}",
+            platform: Spaceship::ConnectAPI::BundleIdPlatform::IOS
+          )
+          puts "CREATED"
+        end
+        """
+    ])
+    if ret_code != 0:
+        print_error(f"Bundle ID check failed: {output}")
+        return False
+    if "CREATED" in output:
+        print_success(f"Created Bundle ID {bundle_id}")
+    else:
+        print_success(f"Bundle ID {bundle_id} already exists")
+    return True
+
+
+# ##################################################################
+# ensure distribution cert
+# Create a distribution cert via ASC API if none exists locally.
+def ensure_distribution_cert() -> bool:
+    if has_distribution_cert():
+        print_success("Distribution certificate already present")
+        return True
+
+    print_info("No distribution cert found locally; creating one via App Store Connect API...")
+    # fastlane's `cert` action handles the create + p12 export + keychain import.
+    # `--type appstore` ⇒ Apple Distribution. With `--api_key_path` it talks to
+    # ASC directly, no Apple-ID login, no match.
+    api_key_json = API_KEY_PATH.parent.parent / "api_key.json"
+    ret_code, output = exec_cmd([
+        "fastlane", "run", "cert",
+        f"api_key_path:{api_key_json}",
+        "type:appstore",
+        f"team_id:{TEAM_ID}",
+        "force:false",
+    ], timeout=120)
+    if ret_code != 0:
+        print_error(f"cert action failed: {output}")
+        return False
+    if not has_distribution_cert():
+        print_error("cert action returned 0 but no distribution cert appeared in keychain")
+        return False
+    print_success("Distribution certificate created and installed")
+    return True
 
 
 # ##################################################################
 # run
-# run signing step
-# syncs certificates and provisioning profiles using fastlane match
+# Signing step: ensure bundle id + distribution cert. No match.
 def run(project_path: Path, state: ProjectState) -> bool:
-    # check if fastlane directory exists
-    fastlane_dir = project_path / "fastlane"
-    if not fastlane_dir.exists():
-        print_error("Fastlane not set up. Run structure step first.")
+    app_name = state.metadata.get("app_name") or state.project_name
+    if not ensure_bundle_id(state.bundle_id, app_name):
         return False
-
-    # ensure app id exists on apple developer portal
-    if not create_app_id(project_path, state):
+    if not ensure_distribution_cert():
+        print_warning("Distribution cert missing — archive will fail")
         return False
-
-    # check matchfile exists
-    matchfile = fastlane_dir / "Matchfile"
-    if not file_exists(matchfile):
-        print_info("Creating Matchfile...")
-        matchfile_content = f'''# Matchfile
-git_url("https://github.com/{CERTIFICATE_REPO}")
-storage_mode("git")
-type("appstore")
-app_identifier("{state.bundle_id}")
-team_id("{TEAM_ID}")
-'''
-        matchfile.write_text(matchfile_content)
-
-    # run match
-    if not run_fastlane_match(project_path, state):
-        return False
-
-    # verify signing is configured
-    if not verify_signing(project_path, state):
-        print_warning("Signing verification failed, but continuing...")
-
     state.metadata["signing_configured"] = True
     return True
-# ##################################################################
-# run
-# run signing step
-# syncs certificates and provisioning profiles using fastlane match
