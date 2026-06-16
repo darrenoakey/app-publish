@@ -2,11 +2,10 @@
 # setup secrets for app-publish
 # interactive cli tool to configure credentials in system keyring
 import sys
-try:
-    import keyring
-except ImportError:
-    print("Error: 'keyring' module not found. Please run 'pip install -r requirements.txt'")
-    sys.exit(1)
+
+# Read/write via /usr/bin/security (see keychain.py) so secrets stay readable
+# without a GUI prompt across Homebrew Python upgrades.
+import keychain
 
 SERVICE_NAME = "app-publish"
 
@@ -36,7 +35,7 @@ def main() -> int:
     print("-" * 50)
 
     for key, description in SECRETS:
-        current_val = keyring.get_password(SERVICE_NAME, key)
+        current_val = keychain.get_password(SERVICE_NAME, key)
         prompt = f"{description}"
         if current_val:
             prompt += f" [{current_val}]"
@@ -45,7 +44,7 @@ def main() -> int:
         new_val = input(prompt).strip()
 
         if new_val:
-            keyring.set_password(SERVICE_NAME, key, new_val)
+            keychain.set_password(SERVICE_NAME, key, new_val)
             print(f"Updated {key}.")
         elif current_val:
             print(f"Kept {key}.")

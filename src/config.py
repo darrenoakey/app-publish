@@ -3,11 +3,10 @@
 from pathlib import Path
 import sys
 
-try:
-    import keyring
-except ImportError:
-    print("Error: 'keyring' module not found. Please run 'pip install -r requirements.txt'")
-    sys.exit(1)
+# Secrets are read via /usr/bin/security (see keychain.py) rather than the
+# in-process `keyring` module, so a Homebrew Python upgrade never triggers a
+# keychain authorisation prompt.
+import keychain
 
 SERVICE_NAME = "app-publish"
 
@@ -19,7 +18,7 @@ _missing_secrets: list[str] = []
 # get secret
 # retrieve a secret from the system keyring for app-publish service
 def get_secret(key: str, required: bool = True) -> str | None:
-    val = keyring.get_password(SERVICE_NAME, key)
+    val = keychain.get_password(SERVICE_NAME, key)
     if not val and required:
         _missing_secrets.append(key)
     return val
@@ -100,7 +99,11 @@ PIPELINE_STEPS = [
     "appstore_create",
     "upload",
     "submit",
+    "deploy",       # deploy to Starbuck (best-effort final step)
 ]
+
+# steps that are best-effort: failure logs a warning but does not halt the pipeline
+OPTIONAL_STEPS = {"deploy"}
 
 # support page configuration
 SUPPORT_DOMAIN = get_secret("support_domain")
@@ -140,10 +143,11 @@ def _validate_secrets() -> None:
         print("\nMissing secrets:")
         for key in _missing_secrets:
             print(f"  - {key}")
-        print("\nTo add a secret, run:")
-        print(f"  python3 -c \"import keyring; keyring.set_password('{SERVICE_NAME}', '<key>', '<value>')\"")
-        print("\nExample:")
-        print(f"  python3 -c \"import keyring; keyring.set_password('{SERVICE_NAME}', '{_missing_secrets[0]}', 'your_value_here')\"")
+        print("\nTo add a secret, run the interactive setup (writes a prompt-free,")
+        print("allow-all keychain item via /usr/bin/security):")
+        print("  python3 src/setup_secrets.py")
+        print("\nOr set one directly:")
+        print(f"  security add-generic-password -s {SERVICE_NAME} -a {_missing_secrets[0]} -w 'your_value_here' -A -U")
         sys.exit(1)
 
 
