@@ -15,6 +15,7 @@
 from pathlib import Path
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState
@@ -31,8 +32,8 @@ from utils import (
 # ##################################################################
 # has distribution cert
 # True if a usable "Apple Distribution" identity is in the login keychain.
-def has_distribution_cert() -> bool:
-    ret_code, output = exec_cmd(["security", "find-identity", "-v", "-p", "codesigning"])
+def has_distribution_cert(security_binary: str = "security") -> bool:
+    ret_code, output = exec_cmd([security_binary, "find-identity", "-v", "-p", "codesigning"])
     if ret_code != 0:
         return False
     return "Apple Distribution" in output
@@ -41,14 +42,17 @@ def has_distribution_cert() -> bool:
 # ##################################################################
 # ensure bundle id
 # Ensure the bundle id exists on the developer portal. Idempotent.
-def ensure_bundle_id(bundle_id: str, app_name: str) -> bool:
+def ensure_bundle_id(bundle_id: str, app_name: str, ruby_binary: str = "ruby") -> bool:
     # Use a small inline spaceship call via the `ruby` binary that ships
     # with fastlane — avoids pulling in a Python ASC client just for one
     # idempotent operation.
     print_info(f"Ensuring Bundle ID {bundle_id} on developer portal...")
-    ret_code, output = exec_cmd([
-        "ruby", "-rspaceship", "-e",
-        f"""
+    ret_code, output = exec_cmd(
+        [
+            ruby_binary,
+            "-rspaceship",
+            "-e",
+            f"""
         token = Spaceship::ConnectAPI::Token.create(
           key_id: "{API_KEY_ID}",
           issuer_id: "{API_ISSUER_ID}",
@@ -67,8 +71,9 @@ def ensure_bundle_id(bundle_id: str, app_name: str) -> bool:
           )
           puts "CREATED"
         end
-        """
-    ])
+        """,
+        ]
+    )
     if ret_code != 0:
         print_error(f"Bundle ID check failed: {output}")
         return False
@@ -82,8 +87,8 @@ def ensure_bundle_id(bundle_id: str, app_name: str) -> bool:
 # ##################################################################
 # ensure distribution cert
 # Create a distribution cert via ASC API if none exists locally.
-def ensure_distribution_cert() -> bool:
-    if has_distribution_cert():
+def ensure_distribution_cert(fastlane_binary: str = "fastlane", security_binary: str = "security") -> bool:
+    if has_distribution_cert(security_binary):
         print_success("Distribution certificate already present")
         return True
 
@@ -92,17 +97,22 @@ def ensure_distribution_cert() -> bool:
     # `--type appstore` ⇒ Apple Distribution. With `--api_key_path` it talks to
     # ASC directly, no Apple-ID login, no match.
     api_key_json = API_KEY_PATH.parent.parent / "api_key.json"
-    ret_code, output = exec_cmd([
-        "fastlane", "run", "cert",
-        f"api_key_path:{api_key_json}",
-        "type:appstore",
-        f"team_id:{TEAM_ID}",
-        "force:false",
-    ], timeout=120)
+    ret_code, output = exec_cmd(
+        [
+            fastlane_binary,
+            "run",
+            "cert",
+            f"api_key_path:{api_key_json}",
+            "type:appstore",
+            f"team_id:{TEAM_ID}",
+            "force:false",
+        ],
+        timeout=120,
+    )
     if ret_code != 0:
         print_error(f"cert action failed: {output}")
         return False
-    if not has_distribution_cert():
+    if not has_distribution_cert(security_binary):
         print_error("cert action returned 0 but no distribution cert appeared in keychain")
         return False
     print_success("Distribution certificate created and installed")

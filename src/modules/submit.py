@@ -6,11 +6,13 @@
 # - submitting for review via app store connect api
 
 import time
+from threading import Event
 import jwt
 import requests
 from pathlib import Path
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState, load_state, save_state
@@ -21,9 +23,10 @@ from utils import (
     print_warning,
     print_error,
     run as exec_cmd,
-    file_exists,
     read_file,
 )
+
+API_BASE_URL = "https://api.appstoreconnect.apple.com/v1"
 
 
 # ##################################################################
@@ -32,20 +35,18 @@ from utils import (
 def get_api_token() -> str:
     private_key = read_file(API_KEY_PATH)
 
-    header = {
-        "alg": "ES256",
-        "kid": API_KEY_ID,
-        "typ": "JWT"
-    }
+    header = {"alg": "ES256", "kid": API_KEY_ID, "typ": "JWT"}
 
     payload = {
         "iss": API_ISSUER_ID,
         "iat": int(time.time()),
         "exp": int(time.time()) + 1200,  # 20 minutes
-        "aud": "appstoreconnect-v1"
+        "aud": "appstoreconnect-v1",
     }
 
     return jwt.encode(payload, private_key, algorithm="ES256", headers=header)
+
+
 # ##################################################################
 # get api token
 # generates jwt token for app store connect api
@@ -54,14 +55,16 @@ def get_api_token() -> str:
 # ##################################################################
 # api request
 # makes a request to app store connect api
-def api_request(method: str, endpoint: str, token: str, data: dict | None = None) -> dict | None:
-    base_url = "https://api.appstoreconnect.apple.com/v1"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
+def api_request(
+    method: str,
+    endpoint: str,
+    token: str,
+    data: dict | None = None,
+    base_url: str = API_BASE_URL,
+) -> dict | None:
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    url = f"{base_url}/{endpoint}"
+    url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
     if method == "GET":
         resp = requests.get(url, headers=headers)
@@ -81,6 +84,8 @@ def api_request(method: str, endpoint: str, token: str, data: dict | None = None
     if resp.text:
         return resp.json()
     return {}
+
+
 # ##################################################################
 # api request
 # makes a request to app store connect api
@@ -98,23 +103,29 @@ def wait_for_build_processing(state: ProjectState, max_wait_minutes: int = 30) -
     # Poll every 2 minutes
     for i in range(max_wait_minutes // 2):
         # Check build status using fastlane
-        ret_code, output = exec_cmd([
-            "fastlane", "run", "latest_testflight_build_number",
-            "app_identifier:" + state.bundle_id,
-            "api_key_path:" + str(api_key_json),
-        ])
+        ret_code, output = exec_cmd(
+            [
+                "fastlane",
+                "run",
+                "latest_testflight_build_number",
+                "app_identifier:" + state.bundle_id,
+                "api_key_path:" + str(api_key_json),
+            ]
+        )
 
         if ret_code == 0 and str(state.current_build) in output:
             print_success(f"Build {state.current_build} is ready")
             return True
 
         if i < (max_wait_minutes // 2) - 1:
-            print_info(f"Build still processing... (checked {i+1} times)")
-            time.sleep(120)  # Wait 2 minutes
+            print_info(f"Build still processing... (checked {i + 1} times)")
+            Event().wait(120)  # Wait 2 minutes
 
     print_warning("Build processing is taking longer than expected")
     print_info("You may need to submit manually from App Store Connect")
     return False
+
+
 # ##################################################################
 # wait for build processing
 # waits for the build to finish processing in app store connect
@@ -123,7 +134,7 @@ def wait_for_build_processing(state: ProjectState, max_wait_minutes: int = 30) -
 # ##################################################################
 # submit for review
 # submits the app for app store review via app store connect api
-def submit_for_review(project_path: Path, state: ProjectState) -> bool:
+def submit_for_review(project_path: Path, state: ProjectState, base_url: str = API_BASE_URL) -> bool:
     print_info("Submitting for App Store review via API...")
 
     try:
@@ -132,8 +143,11 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
         print_error(f"Failed to generate API token: {e}")
         return False
 
+    def request(method: str, endpoint: str, data: dict | None = None) -> dict | None:
+        return api_request(method, endpoint, token, data, base_url)
+
     # Get app ID (should be a UUID, not the numeric App Store ID)
-    result = api_request("GET", f"apps?filter[bundleId]={state.bundle_id}", token)
+    result = request("GET", f"apps?filter[bundleId]={state.bundle_id}")
     if not result or not result.get("data"):
         print_error("Could not find app in App Store Connect")
         return False
@@ -141,17 +155,15 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
     print_info(f"App ID from API: {app_id}")
 
     # Get the version in PREPARE_FOR_SUBMISSION state that matches our version number
-    result = api_request(
+    result = request(
         "GET",
         f"apps/{app_id}/appStoreVersions?filter[appStoreState]=PREPARE_FOR_SUBMISSION",
-        token
     )
     if not result or not result.get("data"):
         # Check if already in review
-        result = api_request(
+        result = request(
             "GET",
             f"apps/{app_id}/appStoreVersions?filter[appStoreState]=WAITING_FOR_REVIEW,IN_REVIEW",
-            token
         )
         if result and result.get("data"):
             print_info("App is already submitted for review")
@@ -180,7 +192,7 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
     print_info(f"Found version ID: {version_id} (version {target_version}, state: {version_state})")
 
     # Check if there are any issues with the version
-    result = api_request("GET", f"appStoreVersions/{version_id}?include=appStoreVersionSubmission,build", token)
+    result = request("GET", f"appStoreVersions/{version_id}?include=appStoreVersionSubmission,build")
     if result:
         attrs = result.get("data", {}).get("attributes", {})
         if attrs.get("appStoreState") != "PREPARE_FOR_SUBMISSION":
@@ -196,7 +208,10 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
 
             # First try: VALID builds
             print_info(f"Searching for builds for app {app_id}...")
-            build_result = api_request("GET", f"builds?filter[app]={app_id}&filter[processingState]=VALID&sort=-uploadedDate&limit=1", token)
+            build_result = request(
+                "GET",
+                f"builds?filter[app]={app_id}&filter[processingState]=VALID&sort=-uploadedDate&limit=1",
+            )
             if build_result and build_result.get("data"):
                 build_id = build_result["data"][0]["id"]
                 print_info(f"Found VALID build: {build_id}")
@@ -206,7 +221,7 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
             # Second try: Any builds (might be in a different state)
             if not build_id:
                 print_info("Trying unfiltered build query...")
-                build_result = api_request("GET", f"builds?filter[app]={app_id}&sort=-uploadedDate&limit=5", token)
+                build_result = request("GET", f"builds?filter[app]={app_id}&sort=-uploadedDate&limit=5")
                 if build_result:
                     builds = build_result.get("data", [])
                     print_info(f"Found {len(builds)} builds total")
@@ -225,51 +240,26 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
 
             if build_id:
                 print_info(f"Attaching build {build_id} to version...")
-                attach_data = {
-                    "data": {
-                        "type": "builds",
-                        "id": build_id
-                    }
-                }
-                attach_result = api_request("PATCH", f"appStoreVersions/{version_id}/relationships/build", token, attach_data)
+                attach_data = {"data": {"type": "builds", "id": build_id}}
+                attach_result = request(
+                    "PATCH",
+                    f"appStoreVersions/{version_id}/relationships/build",
+                    attach_data,
+                )
                 if attach_result is not None:
                     print_success("Build attached to version")
                 else:
                     print_warning("Failed to attach build")
 
-    # Create an app store version submission
-    submission_data = {
-        "data": {
-            "type": "appStoreVersionSubmissions",
-            "relationships": {
-                "appStoreVersion": {
-                    "data": {
-                        "type": "appStoreVersions",
-                        "id": version_id
-                    }
-                }
-            }
-        }
-    }
-
     # Step 1: Create review submission
     review_submission_data = {
         "data": {
             "type": "reviewSubmissions",
-            "attributes": {
-                "platform": "IOS"
-            },
-            "relationships": {
-                "app": {
-                    "data": {
-                        "type": "apps",
-                        "id": app_id
-                    }
-                }
-            }
+            "attributes": {"platform": "IOS"},
+            "relationships": {"app": {"data": {"type": "apps", "id": app_id}}},
         }
     }
-    result = api_request("POST", "reviewSubmissions", token, review_submission_data)
+    result = request("POST", "reviewSubmissions", review_submission_data)
     if not result:
         print_warning("Failed to create review submission")
         print_error("Submission failed via API")
@@ -284,26 +274,16 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
         "data": {
             "type": "reviewSubmissionItems",
             "relationships": {
-                "reviewSubmission": {
-                    "data": {
-                        "type": "reviewSubmissions",
-                        "id": submission_id
-                    }
-                },
-                "appStoreVersion": {
-                    "data": {
-                        "type": "appStoreVersions",
-                        "id": version_id
-                    }
-                }
-            }
+                "reviewSubmission": {"data": {"type": "reviewSubmissions", "id": submission_id}},
+                "appStoreVersion": {"data": {"type": "appStoreVersions", "id": version_id}},
+            },
         }
     }
-    result = api_request("POST", "reviewSubmissionItems", token, review_item_data)
+    result = request("POST", "reviewSubmissionItems", review_item_data)
     if not result:
         print_warning("Failed to add version to review submission")
         # Try to delete the incomplete submission
-        api_request("DELETE", f"reviewSubmissions/{submission_id}", token)
+        request("DELETE", f"reviewSubmissions/{submission_id}")
         print_error("Submission failed via API")
         print_info("Submit manually from: https://appstoreconnect.apple.com")
         return False
@@ -315,12 +295,10 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
         "data": {
             "type": "reviewSubmissions",
             "id": submission_id,
-            "attributes": {
-                "submitted": True
-            }
+            "attributes": {"submitted": True},
         }
     }
-    result = api_request("PATCH", f"reviewSubmissions/{submission_id}", token, confirm_data)
+    result = request("PATCH", f"reviewSubmissions/{submission_id}", confirm_data)
     if result:
         print_success("App submitted for review!")
         return True
@@ -329,6 +307,8 @@ def submit_for_review(project_path: Path, state: ProjectState) -> bool:
     print_error("Submission failed via API")
     print_info("Submit manually from: https://appstoreconnect.apple.com")
     return False
+
+
 # ##################################################################
 # submit for review
 # submits the app for app store review via app store connect api
@@ -342,7 +322,14 @@ def tag_release(project_path: Path, state: ProjectState) -> bool:
     print_info(f"Creating release tag: {tag_name}")
 
     ret_code, output = exec_cmd(
-        ["git", "tag", "-a", tag_name, "-m", f"Release {state.current_version} (build {state.current_build})"],
+        [
+            "git",
+            "tag",
+            "-a",
+            tag_name,
+            "-m",
+            f"Release {state.current_version} (build {state.current_build})",
+        ],
         cwd=project_path,
     )
 
@@ -368,6 +355,8 @@ def tag_release(project_path: Path, state: ProjectState) -> bool:
         print_success("Tag pushed to remote")
 
     return True
+
+
 # ##################################################################
 # tag release
 
@@ -396,6 +385,8 @@ def run(project_path: Path, state: ProjectState) -> bool:
     tag_release(project_path, state)
 
     return True
+
+
 # ##################################################################
 # run
 # runs submit step and submits the app for app store review

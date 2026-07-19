@@ -1,0 +1,165 @@
+# Fastfile for <%= app_name %>
+#
+# NO FASTLANE MATCH. We do not use match, we never set a MATCH_PASSWORD,
+# and there is no encrypted cert-repo dependency on this machine. Signing
+# is handled entirely by Xcode automatic signing driven by the App Store
+# Connect API key — xcodebuild calls below pass `-allowProvisioningUpdates`
+# plus `-authenticationKey{Path,ID,IssuerID}` so Xcode reaches out to the
+# developer portal, creates/refreshes whatever cert + profile is missing,
+# and signs the archive in one shot.
+#
+# If you ever see "match" in this file, that is a regression — fix it.
+
+default_platform(:ios)
+
+BUNDLE_ID = "<%= bundle_id %>"
+APP_NAME  = "<%= app_name %>"
+TEAM_ID   = "58MF5GATL7"
+SCHEME    = "<%= scheme %>"
+PROJECT   = "<%= project_rel %>"
+
+API_KEY_ID    = "8T4RKNCA74"
+API_ISSUER_ID = "69a6de6e-6d94-47e3-e053-5b8c7c11a4d1"
+API_KEY_P8    = File.expand_path("~/.appstoreconnect/private_keys/AuthKey_#{API_KEY_ID}.p8")
+API_KEY_JSON  = File.expand_path("~/.appstoreconnect/api_key.json")
+
+def asc_token
+  require 'spaceship'
+  Spaceship::ConnectAPI::Token.create(
+    key_id: API_KEY_ID, issuer_id: API_ISSUER_ID,
+    filepath: API_KEY_P8, in_house: false
+  )
+end
+
+platform :ios do
+  desc "Ensure App ID exists on Developer Portal"
+  lane :ensure_app_id do
+    Spaceship::ConnectAPI.token = asc_token
+    existing = Spaceship::ConnectAPI::BundleId.all.find { |b| b.identifier == BUNDLE_ID }
+    if existing
+      UI.success("Bundle ID #{BUNDLE_ID} already exists")
+    else
+      Spaceship::ConnectAPI::BundleId.create(
+        name: APP_NAME, identifier: BUNDLE_ID,
+        platform: Spaceship::ConnectAPI::BundleIdPlatform::IOS
+      )
+      UI.success("Created Bundle ID #{BUNDLE_ID}")
+    end
+  end
+
+  desc "Ensure ASC app record exists"
+  lane :ensure_app_record do
+    Spaceship::ConnectAPI.token = asc_token
+    existing = Spaceship::ConnectAPI::App.find(BUNDLE_ID)
+    if existing
+      UI.success("ASC app record exists: #{existing.name}")
+    else
+      Spaceship::ConnectAPI::App.create(
+        name: APP_NAME, version_string: "1.0",
+        sku: BUNDLE_ID.gsub('.', '_'),
+        primary_locale: "en-US",
+        bundle_id: BUNDLE_ID,
+        platforms: [Spaceship::ConnectAPI::Platform::IOS]
+      )
+      UI.success("Created ASC app record")
+    end
+  end
+
+  desc "Archive + export IPA — automatic signing via ASC API key (NO MATCH)"
+  lane :build do
+    require 'fileutils'
+    build_dir    = "/tmp/#{BUNDLE_ID}-build"
+    FileUtils.mkdir_p(build_dir)
+    archive_path = "#{build_dir}/app.xcarchive"
+    export_path  = "#{build_dir}/export"
+    options_path = "#{build_dir}/ExportOptions.plist"
+
+    increment_build_number(xcodeproj: PROJECT)
+
+    File.write(options_path, <<~PLIST)
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0">
+      <dict>
+        <key>method</key><string>app-store</string>
+        <key>teamID</key><string>#{TEAM_ID}</string>
+        <key>signingStyle</key><string>automatic</string>
+        <key>uploadSymbols</key><true/>
+        <key>destination</key><string>export</string>
+      </dict>
+      </plist>
+    PLIST
+
+    sh("rm -rf #{Shellwords.escape(archive_path)} #{Shellwords.escape(export_path)}")
+
+    sh([
+      "xcodebuild",
+      "-project", PROJECT,
+      "-scheme", SCHEME,
+      "-configuration", "Release",
+      "-archivePath", archive_path,
+      "-destination", "generic/platform=iOS",
+      "-allowProvisioningUpdates",
+      "-authenticationKeyPath", API_KEY_P8,
+      "-authenticationKeyID", API_KEY_ID,
+      "-authenticationKeyIssuerID", API_ISSUER_ID,
+      "CODE_SIGN_STYLE=Automatic",
+      "DEVELOPMENT_TEAM=#{TEAM_ID}",
+      "archive"
+    ].map { |a| Shellwords.escape(a) }.join(" "))
+
+    sh([
+      "xcodebuild", "-exportArchive",
+      "-archivePath", archive_path,
+      "-exportPath", export_path,
+      "-exportOptionsPlist", options_path,
+      "-allowProvisioningUpdates",
+      "-authenticationKeyPath", API_KEY_P8,
+      "-authenticationKeyID", API_KEY_ID,
+      "-authenticationKeyIssuerID", API_ISSUER_ID,
+    ].map { |a| Shellwords.escape(a) }.join(" "))
+
+    UI.success("IPA at #{export_path}")
+  end
+
+  desc "Upload binary to App Store Connect / TestFlight"
+  lane :upload_binary do
+    ipa = Dir["/tmp/#{BUNDLE_ID}-build/export/*.ipa"].first
+    UI.user_error!("No IPA built — run `fastlane build` first") unless ipa
+    upload_to_app_store(
+      api_key_path: API_KEY_JSON,
+      ipa: ipa,
+      skip_screenshots: true,
+      skip_metadata: true,
+      force: true,
+      precheck_include_in_app_purchases: false,
+      submit_for_review: false
+    )
+  end
+
+  desc "Upload metadata + screenshots only"
+  lane :upload_metadata do
+    upload_to_app_store(
+      api_key_path: API_KEY_JSON,
+      skip_binary_upload: true,
+      skip_screenshots: false,
+      skip_metadata: false,
+      force: true,
+      precheck_include_in_app_purchases: false,
+      submit_for_review: false
+    )
+  end
+
+  desc "Generate screenshots"
+  lane :screenshots do
+    capture_screenshots
+  end
+
+  desc "Full release"
+  lane :release do
+    ensure_app_id
+    ensure_app_record
+    build
+    upload_binary
+  end
+end

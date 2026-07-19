@@ -44,7 +44,8 @@ def capture(project_path: Path, name: str, screens: dict) -> bool:
 
     result = subprocess.run(
         ["xcrun", "simctl", "io", DEVICE, "screenshot", str(filepath)],
-        capture_output=True, text=True
+        capture_output=True,
+        text=True,
     )
 
     if result.returncode == 0:

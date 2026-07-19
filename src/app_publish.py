@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import hashlib
 
-from config import PIPELINE_STEPS
+from config import PIPELINE_STEPS, OPTIONAL_STEPS
 from state import load_state, save_state, reset_state, ProjectState
 from utils import (
     print_header,
@@ -23,7 +23,7 @@ from utils import (
     print_error,
     print_warning,
     print_info,
-    print_skip,
+    print_done,
     cprint,
 )
 
@@ -54,6 +54,8 @@ def increment_version(version_string: str) -> str:
     parts = version_string.split(".")
     major = int(parts[0]) + 1
     return str(major)
+
+
 # ##################################################################
 # increment version
 
@@ -77,6 +79,8 @@ def compute_www_hash(project_path: Path) -> str:
             hasher.update(filepath.read_bytes())
 
     return hasher.hexdigest()
+
+
 # ##################################################################
 # compute www hash
 
@@ -186,7 +190,7 @@ def run_pipeline(project_path: Path, force_restart: bool = False) -> bool:
             state.metadata["www_hash"] = www_hash
             save_state(project_path, state)
         else:
-            print_info("www/ content unchanged - skipping rebuild")
+            print_info("www/ content unchanged - rebuild not required")
 
     # run each remaining step
     total_steps = len(PIPELINE_STEPS)
@@ -194,12 +198,15 @@ def run_pipeline(project_path: Path, force_restart: bool = False) -> bool:
         step_num = PIPELINE_STEPS.index(step) + 1
 
         if state.is_step_completed(step):
-            print_skip(f"[{step_num}/{total_steps}] {step} (already done)")
+            print_done(f"[{step_num}/{total_steps}] {step} (already done)")
             continue
 
         print_step(step_num, total_steps, step)
 
         if not run_step(step, project_path, state):
+            if step in OPTIONAL_STEPS:
+                print_warning(f"Optional step '{step}' failed — continuing (device may not be connected)")
+                continue
             print_error(f"Pipeline stopped at step: {step}")
             print_info("Run again to retry from this step")
             return False
@@ -310,6 +317,16 @@ Examples:
     # deploy mode
     if args.deploy:
         state = load_state(project_path)
+        # auto-detect bundle_id if state doesn't have it (deploy-only, no full pipeline)
+        if not state.bundle_id:
+            from modules.deploy import detect_bundle_id, detect_project_type
+
+            bid = detect_bundle_id(project_path)
+            if bid:
+                state.bundle_id = bid
+            ptype, _, _ = detect_project_type(project_path)
+            if ptype != "unknown":
+                state.project_type = ptype
         device_name = args.deploy
         print_header(f"DEPLOYING TO: {device_name}", "cyan")
         success = deploy.run(project_path, state, device_name)

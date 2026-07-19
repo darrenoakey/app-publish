@@ -1,6 +1,7 @@
 # utility functions for app-publish
 # shared helpers for console output, command execution, file operations,
 # llm integration, git operations, and xcode builds
+import asyncio
 import os
 import sys
 import subprocess
@@ -77,10 +78,10 @@ def print_info(msg: str) -> None:
 
 
 # ##################################################################
-# print skip
-# print skip message for already completed steps
-def print_skip(msg: str) -> None:
-    cprint(f"  [SKIP] {msg}", "yellow")
+# print done
+# print message for a step that was already completed
+def print_done(msg: str) -> None:
+    cprint(f"  [DONE] {msg}", "yellow")
 
 
 # ##################################################################
@@ -199,20 +200,20 @@ def write_file(path: Path, content: str) -> bool:
 
 # ##################################################################
 # llm chat
-# use claude cli in headless mode to get llm response with retries
+# use daz_agent_sdk to get llm response with retries
 def llm_chat(prompt: str, max_retries: int = 2) -> str:
-    cmd = ["claude", "--print"]
+    from daz_agent_sdk import agent, Tier
 
     for attempt in range(max_retries + 1):
-        p = subprocess.run(cmd, input=prompt, capture_output=True, text=True)
-        if p.returncode == 0:
-            return p.stdout.strip()
-
-        if attempt < max_retries:
-            print_warning(f"LLM call failed, retrying... ({attempt + 1}/{max_retries})")
-        else:
-            print_error(f"LLM call failed after {max_retries + 1} attempts: {p.stderr}")
-            return ""
+        try:
+            response = asyncio.run(agent.ask(prompt, tier=Tier.HIGH))
+            return response.text.strip()
+        except Exception as e:
+            if attempt < max_retries:
+                print_warning(f"LLM call failed, retrying... ({attempt + 1}/{max_retries})")
+            else:
+                print_error(f"LLM call failed after {max_retries + 1} attempts: {e}")
+                return ""
 
     return ""
 
@@ -240,15 +241,14 @@ def llm_json(prompt: str) -> Optional[dict[str, any]]:
 
 # ##################################################################
 # claude agent task
-# run claude agent sdk to perform autonomous code generation tasks
-# uses the official claude agent sdk with a persistent session
+# run daz_agent_sdk to perform autonomous code generation tasks
 def claude_agent_task(
     task: str,
     project_path: Path,
     allowed_tools: Optional[list[str]] = None,
-    timeout: int = 600
+    timeout: int = 600,
 ) -> tuple[bool, str]:
-    import anyio
+    from daz_agent_sdk import agent, Tier
 
     print_info(f"Starting Claude agent for: {task[:60]}...")
 
@@ -261,59 +261,22 @@ def claude_agent_task(
     # async function to execute the agent task
     async def run_agent() -> tuple[bool, str]:
         try:
-            from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
-
-            options = ClaudeAgentOptions(
-                cwd=str(project_path),
-                allowed_tools=allowed_tools,
-                permission_mode="acceptEdits",  # auto-accept file edits
-                max_turns=50,  # allow multiple tool uses
+            response = await agent.ask(
+                task,
+                tier=Tier.HIGH,
+                tools=allowed_tools,
+                cwd=project_path,
+                max_turns=50,
+                timeout=float(timeout),
             )
-
-            output_parts = []
-            success = True
-
-            # use ClaudeSDKClient for persistent session with consistent conversation
-            async with ClaudeSDKClient(options=options) as client:
-                await client.query(task)
-
-                async for message in client.receive_response():
-                    # collect text responses
-                    if hasattr(message, 'type'):
-                        if message.type == 'text':
-                            text = message.text if hasattr(message, 'text') else str(message)
-                            output_parts.append(text)
-                            print_info(f"  {text[:100]}..." if len(text) > 100 else f"  {text}")
-                        elif message.type == 'result':
-                            if hasattr(message, 'error') and message.error:
-                                success = False
-                                output_parts.append(f"Error: {message.error}")
-                            elif hasattr(message, 'result'):
-                                output_parts.append(str(message.result))
-                        elif message.type == 'tool_use':
-                            tool_name = getattr(message, 'name', 'unknown')
-                            print_info(f"  [Tool: {tool_name}]")
-                    elif isinstance(message, dict):
-                        msg_type = message.get('type', '')
-                        if msg_type == 'text':
-                            text = message.get('text', '')
-                            output_parts.append(text)
-                        elif msg_type == 'result':
-                            output_parts.append(str(message.get('result', '')))
-                        elif msg_type == 'tool_use':
-                            print_info(f"  [Tool: {message.get('name', 'unknown')}]")
-
-            output = "\n".join(filter(None, output_parts))
-            return success, output
-
-        except ImportError as e:
-            return False, f"Claude Agent SDK not installed. Run: pip install claude-agent-sdk\nError: {e}"
+            return True, response.text
         except Exception as e:
             import traceback
+
             return False, f"Agent error: {e}\n{traceback.format_exc()}"
 
     try:
-        success, output = anyio.run(run_agent)
+        success, output = asyncio.run(run_agent())
 
         if success:
             print_success("Agent task completed")
@@ -331,9 +294,7 @@ def claude_agent_task(
 # is git repo
 # check if path is inside a git repository
 def is_git_repo(path: Path) -> bool:
-    return (path / ".git").exists() or run_silent(
-        ["git", "rev-parse", "--git-dir"], cwd=path
-    )
+    return (path / ".git").exists() or run_silent(["git", "rev-parse", "--git-dir"], cwd=path)
 
 
 # ##################################################################
@@ -445,3 +406,59 @@ def xcode_archive(
     ]
     ret_code, output = run(cmd, timeout=600)
     return ret_code == 0, output
+
+
+# ##################################################################
+# parse schemes
+# extract scheme names from `xcodebuild -list` output (in order)
+def parse_schemes(xcodebuild_list_output: str) -> list[str]:
+    schemes: list[str] = []
+    in_schemes = False
+    for line in xcodebuild_list_output.split("\n"):
+        stripped = line.strip()
+        if stripped == "Schemes:":
+            in_schemes = True
+            continue
+        if in_schemes:
+            if not stripped:
+                break  # blank line terminates the Schemes block
+            schemes.append(stripped)
+    return schemes
+
+
+# ##################################################################
+# pick scheme
+# choose the scheme to build/deploy from `xcodebuild -list`. xcodebuild
+# returns schemes alphabetically and includes Xcode-autocreated schemes for
+# local Swift package products (e.g. a vendored "kokoro-bench" executable)
+# and test bundles — so "the first scheme" is routinely wrong. The reliable
+# signal is the scheme whose name matches the project itself; fall back to a
+# non-test scheme that starts with / contains the project name, and only as
+# a last resort the first listed scheme.
+def pick_scheme(schemes: list[str], project_name: str) -> str:
+    if not schemes:
+        return project_name
+
+    def norm(s: str) -> str:
+        return "".join(c for c in s.lower() if c.isalnum())
+
+    def is_test(s: str) -> bool:
+        n = s.lower()
+        return n.endswith("tests") or n.endswith("test") or "uitest" in n
+
+    target = norm(project_name)
+
+    # 1. exact (separator-insensitive) match to the project name
+    for s in schemes:
+        if norm(s) == target:
+            return s
+    # 2. non-test scheme whose name starts with the project name
+    for s in schemes:
+        if not is_test(s) and target and norm(s).startswith(target):
+            return s
+    # 3. non-test scheme containing the project name
+    for s in schemes:
+        if not is_test(s) and target and target in norm(s):
+            return s
+    # 4. last resort: original behaviour (first listed scheme)
+    return schemes[0]

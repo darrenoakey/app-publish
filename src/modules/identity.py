@@ -5,6 +5,7 @@
 from pathlib import Path
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState
@@ -12,10 +13,8 @@ from utils import (
     print_info,
     print_success,
     print_warning,
-    print_error,
     llm_json,
     write_file,
-    read_file,
     ensure_dir,
 )
 
@@ -145,7 +144,7 @@ def save_metadata_files(project_path: Path, identity: dict[str, any]) -> None:
     # Promotional text
     write_file(metadata_dir / "promotional_text.txt", identity.get("promotional_text", ""))
 
-    # Release notes (placeholder for first release)
+    # Release notes for first release
     write_file(metadata_dir / "release_notes.txt", "Initial release")
 
     print_success("Metadata files saved to fastlane/metadata/en-US/")

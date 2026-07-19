@@ -27,6 +27,37 @@ SECRETS = [
 
 
 # ##################################################################
+# plan secret update
+# decide whether interactive input creates, retains, or leaves a value absent
+def plan_secret_update(current_value: str | None, entered_value: str) -> tuple[str, str | None]:
+    cleaned = entered_value.strip()
+    if cleaned:
+        return "update", cleaned
+    if current_value:
+        return "retain", current_value
+    return "absent", None
+
+
+# ##################################################################
+# build secret prompt
+# show the current value only when one is already stored
+def build_secret_prompt(description: str, current_value: str | None) -> str:
+    current = f" [{current_value}]" if current_value else ""
+    return f"{description}{current}: "
+
+
+# ##################################################################
+# describe secret action
+# provide a precise result message for each interactive decision
+def describe_secret_action(key: str, action: str) -> str:
+    if action == "update":
+        return f"Updated {key}."
+    if action == "retain":
+        return f"Kept {key}."
+    return f"No value stored for {key}."
+
+
+# ##################################################################
 # main
 # interactive loop to prompt for and store each secret in keyring
 def main() -> int:
@@ -36,20 +67,13 @@ def main() -> int:
 
     for key, description in SECRETS:
         current_val = keychain.get_password(SERVICE_NAME, key)
-        prompt = f"{description}"
-        if current_val:
-            prompt += f" [{current_val}]"
-        prompt += ": "
+        prompt = build_secret_prompt(description, current_val)
 
-        new_val = input(prompt).strip()
+        action, value = plan_secret_update(current_val, input(prompt))
 
-        if new_val:
-            keychain.set_password(SERVICE_NAME, key, new_val)
-            print(f"Updated {key}.")
-        elif current_val:
-            print(f"Kept {key}.")
-        else:
-            print(f"Skipped {key} (no value set).")
+        if action == "update":
+            keychain.set_password(SERVICE_NAME, key, value)
+        print(describe_secret_action(key, action))
 
     print("-" * 50)
     print("Setup complete. Values stored in system keyring.")

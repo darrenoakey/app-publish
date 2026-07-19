@@ -1,0 +1,53 @@
+import importlib
+
+import modules.structure as structure_module
+from modules.structure import (
+    create_run_script,
+    run,
+    setup_fastlane,
+    setup_swift_project,
+    setup_web_project,
+)
+from state import ProjectState
+
+importlib.reload(structure_module)
+
+
+def test_structure_builds_fastlane_files_and_executable_runner(tmp_path) -> None:
+    project = tmp_path / "Reader.xcodeproj"
+    project.mkdir()
+    state = ProjectState(project_name="Reader", app_name="Reader", bundle_id="com.example.reader")
+    assert setup_swift_project(tmp_path, state)
+    assert setup_fastlane(tmp_path, state)
+    assert create_run_script(tmp_path, state)
+    assert (tmp_path / "fastlane" / "Fastfile").is_file()
+    assert (tmp_path / "fastlane" / "Snapfile").is_file()
+    runner = tmp_path / "run"
+    assert runner.stat().st_mode & 0o111
+    assert "app-publish ." in runner.read_text()
+
+
+def test_structure_rejects_incomplete_projects_using_real_directories(tmp_path, capsys) -> None:
+    web = tmp_path / "web"
+    (web / "node_modules" / "@capacitor").mkdir(parents=True)
+    web_state = ProjectState(project_name="Reader", app_name="Reader", bundle_id="com.example.reader")
+    assert setup_web_project(web, web_state) is False
+    assert (web / "package.json").is_file()
+    assert "No index.html found" in capsys.readouterr().out
+
+    swift = tmp_path / "swift"
+    swift.mkdir()
+    swift_state = ProjectState(project_type="swift", project_name="Reader")
+    assert setup_swift_project(swift, swift_state) is False
+    assert run(swift, ProjectState(project_type="unknown")) is False
+
+
+def test_structure_preserves_existing_local_automation_files(tmp_path) -> None:
+    fastlane = tmp_path / "fastlane"
+    fastlane.mkdir()
+    runner = tmp_path / "run"
+    runner.write_text("#!/bin/sh\nexit 0\n")
+    state = ProjectState(project_name="Reader", bundle_id="com.example.reader")
+    assert setup_fastlane(tmp_path, state) is True
+    assert create_run_script(tmp_path, state) is True
+    assert runner.read_text() == "#!/bin/sh\nexit 0\n"

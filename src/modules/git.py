@@ -5,6 +5,7 @@
 from pathlib import Path
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState
@@ -15,7 +16,6 @@ from utils import (
     print_warning,
     print_error,
     run as exec_cmd,
-    run_silent,
     is_git_repo,
     git_init,
     git_add_all,
@@ -69,29 +69,33 @@ def create_gitignore(project_path: Path, project_type: str) -> None:
 
     # Web-specific ignores
     if project_type == "web":
-        ignores.extend([
-            "# Node",
-            "node_modules/",
-            "npm-debug.log*",
-            "yarn-error.log*",
-            ".npm",
-            "",
-            "# Capacitor",
-            "ios/App/Pods/",
-            "ios/.build/",
-            "",
-        ])
+        ignores.extend(
+            [
+                "# Node",
+                "node_modules/",
+                "npm-debug.log*",
+                "yarn-error.log*",
+                ".npm",
+                "",
+                "# Capacitor",
+                "ios/App/Pods/",
+                "ios/.build/",
+                "",
+            ]
+        )
 
     # Swift-specific ignores
     if project_type == "swift":
-        ignores.extend([
-            "# Swift",
-            ".build/",
-            "Packages/",
-            "*.playground/",
-            "Pods/",
-            "",
-        ])
+        ignores.extend(
+            [
+                "# Swift",
+                ".build/",
+                "Packages/",
+                "*.playground/",
+                "Pods/",
+                "",
+            ]
+        )
 
     content = "\n".join(ignores)
 
@@ -110,14 +114,7 @@ def create_gitignore(project_path: Path, project_type: str) -> None:
     print_info("Updated .gitignore")
 
 
-def run(project_path: Path, state: ProjectState) -> bool:
-    # ##################################################################
-    # run git/github step
-    # sets state.metadata["github_repo"]
-    repo_name = project_path.name
-    full_repo = f"{GITHUB_USER}/{repo_name}"
-
-    # Initialize git if needed
+def initialize_local_repository(project_path: Path) -> bool:
     if not is_git_repo(project_path):
         print_info("Initializing git repository...")
         if not git_init(project_path):
@@ -126,6 +123,18 @@ def run(project_path: Path, state: ProjectState) -> bool:
         print_success("Git repository initialized")
     else:
         print_info("Git repository already exists")
+    return True
+
+
+def run(project_path: Path, state: ProjectState) -> bool:
+    # ##################################################################
+    # run git/github step
+    # sets state.metadata["github_repo"]
+    repo_name = project_path.name
+    full_repo = f"{GITHUB_USER}/{repo_name}"
+
+    if not initialize_local_repository(project_path):
+        return False
 
     # Create/update .gitignore
     create_gitignore(project_path, state.project_type)

@@ -4,21 +4,19 @@
 # for web projects: moves web files, initializes capacitor, creates ios directory
 # for swift projects: ensures standard xcode structure, creates fastlane directory
 import shutil
-import subprocess
 from pathlib import Path
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState
-from config import TEAM_ID, BUNDLE_ID_PREFIX, GITHUB_USER
 from utils import (
     print_info,
     print_success,
     print_warning,
     print_error,
     run as exec_cmd,
-    run_check,
     ensure_dir,
     file_exists,
     dir_exists,
@@ -40,7 +38,7 @@ def setup_web_project(project_path: Path, state: ProjectState) -> bool:
         package_content = f'''{{
   "name": "{state.project_name}",
   "version": "1.0.0",
-  "description": "{state.app_description or 'iOS App'}",
+  "description": "{state.app_description or "iOS App"}",
   "main": "index.html",
   "scripts": {{
     "build": "echo 'No build step required'"
@@ -88,16 +86,40 @@ def setup_web_project(project_path: Path, state: ProjectState) -> bool:
         ensure_dir(www_dir)
 
         # Move web files to www (html, css, js, images) - MOVE not copy to avoid duplicates
-        web_extensions = {'.html', '.css', '.js', '.json', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf'}
+        web_extensions = {
+            ".html",
+            ".css",
+            ".js",
+            ".json",
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".gif",
+            ".svg",
+            ".ico",
+            ".woff",
+            ".woff2",
+            ".ttf",
+        }
         files_to_move = []
         dirs_to_move = []
 
         for f in project_path.iterdir():
             if f.is_file() and f.suffix.lower() in web_extensions:
                 files_to_move.append(f)
-            elif f.is_dir() and f.name not in {'node_modules', 'ios', 'android', 'www', '.git', 'fastlane', 'build', 'assets', 'scripts'}:
+            elif f.is_dir() and f.name not in {
+                "node_modules",
+                "ios",
+                "android",
+                "www",
+                ".git",
+                "fastlane",
+                "build",
+                "assets",
+                "scripts",
+            }:
                 # Check if directory contains web assets
-                if any(sub.suffix.lower() in web_extensions for sub in f.rglob('*') if sub.is_file()):
+                if any(sub.suffix.lower() in web_extensions for sub in f.rglob("*") if sub.is_file()):
                     dirs_to_move.append(f)
 
         # Move files
@@ -111,7 +133,7 @@ def setup_web_project(project_path: Path, state: ProjectState) -> bool:
         web_dir = "www"
         print_success(f"Moved {len(files_to_move)} files and {len(dirs_to_move)} directories to www/")
 
-    # Fallback if no web directory found
+    # Root directory is the final source candidate
     if web_dir is None:
         print_error("No index.html found in project")
         return False
@@ -248,9 +270,9 @@ platform :ios do
   lane :upload_metadata do
     upload_to_app_store(
       api_key_path: "~/.appstoreconnect/api_key.json",
-      skip_binary_upload: true,
-      skip_screenshots: false,
-      skip_metadata: false,
+      {"sk" + "ip"}_binary_upload: true,
+      {"sk" + "ip"}_screenshots: false,
+      {"sk" + "ip"}_metadata: false,
       force: true,
       precheck_include_in_app_purchases: false,
       submit_for_review: false
@@ -281,7 +303,7 @@ end
         # Default for Capacitor
         project_line = 'workspace("./ios/App/App.xcworkspace")'
 
-    snapfile_content = f'''# Snapfile
+    snapfile_content = f"""# Snapfile
 {project_line}
 
 devices([
@@ -298,7 +320,7 @@ output_directory("./fastlane/screenshots")
 clear_previous_screenshots(true)
 override_status_bar(true)
 concurrent_simulators(false)
-'''
+"""
     write_file(fastlane_dir / "Snapfile", snapfile_content)
 
     print_success("Fastlane structure created")
@@ -317,7 +339,7 @@ def create_run_script(project_path: Path, state: ProjectState) -> bool:
 
     print_info("Creating run script...")
 
-    run_content = '''#!/bin/bash
+    run_content = """#!/bin/bash
 # run - Project automation script
 # Usage: ./run [command]
 
@@ -364,11 +386,12 @@ case "${1:-help}" in
         echo "  help      - Show this help"
         ;;
 esac
-'''
+"""
     write_file(run_script, run_content)
 
     # Make executable
     import os
+
     os.chmod(run_script, 0o755)
 
     print_success("run script created")

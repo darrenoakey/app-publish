@@ -50,9 +50,17 @@ def set_password(service: str, account: str, value: str) -> None:
     )
     subprocess.run(
         [
-            SECURITY, "add-generic-password",
-            "-s", service, "-a", account, "-l", service,
-            "-w", value, "-A",
+            SECURITY,
+            "add-generic-password",
+            "-s",
+            service,
+            "-a",
+            account,
+            "-l",
+            service,
+            "-w",
+            value,
+            "-A",
         ],
         check=True,
         capture_output=True,

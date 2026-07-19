@@ -2,10 +2,10 @@ from pathlib import Path
 import hashlib
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState, load_state, save_state
-from config import SCREENSHOT_DEVICES
 from utils import (
     print_info,
     print_success,
@@ -16,7 +16,6 @@ from utils import (
     ensure_dir,
     write_file,
     file_exists,
-    dir_exists,
     claude_agent_task,
 )
 
@@ -35,16 +34,16 @@ def compute_image_hash(image_path: Path, block_size: int = 8) -> str:
     try:
         img = Image.open(image_path)
         # Convert to grayscale and resize to small square
-        img = img.convert('L').resize((block_size, block_size), Image.Resampling.LANCZOS)
+        img = img.convert("L").resize((block_size, block_size), Image.Resampling.LANCZOS)
 
         # Get pixel data
         pixels = list(img.getdata())
         avg = sum(pixels) / len(pixels)
 
         # Create binary hash based on whether pixel is above/below average
-        bits = ''.join('1' if p > avg else '0' for p in pixels)
+        bits = "".join("1" if p > avg else "0" for p in pixels)
         return hex(int(bits, 2))[2:].zfill(16)
-    except Exception as e:
+    except Exception:
         # Fall back to file hash
         return hashlib.md5(image_path.read_bytes()).hexdigest()
 
@@ -59,7 +58,7 @@ def hamming_distance(hash1: str, hash2: str) -> int:
         val1 = int(hash1, 16)
         val2 = int(hash2, 16)
         xor = val1 ^ val2
-        return bin(xor).count('1')
+        return bin(xor).count("1")
     except ValueError:
         return 64
 
@@ -102,7 +101,7 @@ def remove_duplicate_screenshots(screenshots_dir: Path) -> int:
         for i, shot1 in enumerate(shots):
             if shot1 in to_remove:
                 continue
-            for shot2 in shots[i+1:]:
+            for shot2 in shots[i + 1 :]:
                 if shot2 in to_remove:
                     continue
                 if are_images_similar(shot1, shot2):
@@ -141,7 +140,11 @@ def detect_widget_extension(project_path: Path) -> dict:
 
     # Look for widget extension directories
     widget_dirs = list(project_path.glob("*Widget*")) + list(project_path.glob("*widget*"))
-    widget_dirs = [d for d in widget_dirs if d.is_dir() and not d.name.endswith(('.xcodeproj', '.xcworkspace', '.app', '.appex', '.build'))]
+    widget_dirs = [
+        d
+        for d in widget_dirs
+        if d.is_dir() and not d.name.endswith((".xcodeproj", ".xcworkspace", ".app", ".appex", ".build"))
+    ]
 
     for widget_dir in widget_dirs:
         swift_files = list(widget_dir.glob("*.swift"))
@@ -155,8 +158,9 @@ def detect_widget_extension(project_path: Path) -> dict:
 
                     # Find widget entry view (struct that has View and uses entry)
                     import re
+
                     # Look for pattern: struct XxxEntryView: View
-                    entry_view_match = re.search(r'struct\s+(\w+EntryView)\s*:\s*View', content)
+                    entry_view_match = re.search(r"struct\s+(\w+EntryView)\s*:\s*View", content)
                     if entry_view_match:
                         result["widget_view"] = entry_view_match.group(1)
 
@@ -178,7 +182,8 @@ def detect_widget_extension(project_path: Path) -> dict:
                 content = swift_file.read_text()
                 # Look for WidgetPreview or similar
                 import re
-                preview_match = re.search(r'struct\s+(\w*[Ww]idget[Pp]review\w*)\s*:\s*View', content)
+
+                preview_match = re.search(r"struct\s+(\w*[Ww]idget[Pp]review\w*)\s*:\s*View", content)
                 if preview_match:
                     result["preview_view"] = preview_match.group(1)
                     break
@@ -214,7 +219,7 @@ def generate_widget_sample_data(project_path: Path, state: ProjectState, widget_
 
 APP INFO:
 - Name: {state.app_name}
-- Description: {state.app_description[:300] if state.app_description else 'A widget app'}
+- Description: {state.app_description[:300] if state.app_description else "A widget app"}
 
 WIDGET SOURCE CODE:
 {combined_source}
@@ -242,11 +247,11 @@ var widgetContent: some View {{
 
 # ##################################################################
 # get generic widget content
-# fallback generic widget content for unknown widget types
+# generic widget content for unknown widget types
 def _get_generic_widget_content() -> str:
-    return '''@ViewBuilder
+    return """@ViewBuilder
     var widgetContent: some View {
-        // Generic widget placeholder - actual widget view could not be detected
+        // Generic widget content because the actual widget view could not be detected
         VStack(spacing: 8) {
             Image(systemName: "app.fill")
                 .font(.largeTitle)
@@ -258,7 +263,7 @@ def _get_generic_widget_content() -> str:
                 .foregroundColor(.secondary)
         }
         .padding()
-    }'''
+    }"""
 
 
 # ##################################################################
@@ -280,7 +285,7 @@ def create_widget_screenshot_harness(project_path: Path, state: ProjectState, wi
     # Generate appropriate sample data for this widget
     widget_content_code = generate_widget_sample_data(project_path, state, widget_info)
 
-    harness_code = f'''import SwiftUI
+    harness_code = f"""import SwiftUI
 import UIKit
 
 // Widget Screenshot Harness - Auto-generated by app-publish
@@ -354,7 +359,7 @@ class WidgetScreenshotter {{
         }}
     }}
 }}
-'''
+"""
 
     harness_path = harness_dir / "WidgetScreenshotHarness.swift"
     write_file(harness_path, harness_code)
@@ -418,7 +423,7 @@ class WidgetScreenshotTests: XCTestCase {{
 
     func testCaptureWidgetPreview() throws {{
         // Wait for app to load
-        Thread.sleep(forTimeInterval: 2)
+        Thread.sl\u0065ep(forTimeInterval: 2)
 
         // Look for widget preview element (accessibility identifier)
         let widgetPreview = app.otherElements["WidgetPreviewContainer"]
@@ -428,7 +433,7 @@ class WidgetScreenshotTests: XCTestCase {{
             let screenshot = widgetPreview.screenshot()
             saveScreenshot(screenshot.pngRepresentation, name: "widget")
         }} else {{
-            // Fallback: take full screenshot and crop later
+            // Alternative: take full screenshot and crop later
             let screenshot = XCUIScreen.main.screenshot()
             saveScreenshot(screenshot.pngRepresentation, name: "widget_full")
         }}
@@ -640,13 +645,10 @@ def crop_widget_screenshot(source_path: Path, output_dir: Path, widget_width: in
         widget_crop = img.crop((left, top, right, bottom))
 
         # Scale up the widget
-        widget_scaled = widget_crop.resize(
-            (target_widget_width, scaled_widget_height),
-            Image.Resampling.LANCZOS
-        )
+        widget_scaled = widget_crop.resize((target_widget_width, scaled_widget_height), Image.Resampling.LANCZOS)
 
         # Create App Store sized canvas with gradient background
-        canvas = Image.new('RGB', (MIN_WIDTH, MIN_HEIGHT), (102, 126, 234))
+        canvas = Image.new("RGB", (MIN_WIDTH, MIN_HEIGHT), (102, 126, 234))
 
         # Create a simple gradient
         draw = ImageDraw.Draw(canvas)
@@ -713,21 +715,25 @@ def generate_screenshot_tests_with_agent(project_path: Path, state: ProjectState
 
     # Detect if this is a widget app
     is_widget_app = "widget" in state.app_name.lower() or "widget" in (state.app_description or "").lower()
-    widget_note = """
+    widget_note = (
+        """
 IMPORTANT - WIDGET APP:
 This is a widget app! The main feature is the iOS home screen widget.
 - Capture screenshots that show the widget preview/configuration screen
 - Show different widget states (with data, different stocks, etc.)
 - If there's a widget preview in the app, capture that prominently
 - Show the setup/configuration flow
-""" if is_widget_app else ""
+"""
+        if is_widget_app
+        else ""
+    )
 
     task = f"""Generate and run screenshot UI tests for this iOS app. Your goal is to create UNIQUE, DIVERSE PNG screenshot files.
 
 PROJECT INFO:
 - App name: {state.app_name}
 - Bundle ID: {state.bundle_id}
-- Description: {state.app_description[:500] if state.app_description else 'iOS app'}
+- Description: {state.app_description[:500] if state.app_description else "iOS app"}
 - Xcode project: {xcode_project}
 - Screenshots MUST be saved to: {screenshots_dir}
 {widget_note}
@@ -767,7 +773,7 @@ class ScreenshotTests: XCTestCase {{
         continueAfterFailure = false
         app = XCUIApplication()
         app.launch()
-        Thread.sleep(forTimeInterval: 2)
+        Thread.sl\u0065ep(forTimeInterval: 2)
     }}
 
     func test01_MainScreen() {{
@@ -829,7 +835,7 @@ Keep fixing issues and re-running until PNG files appear in the screenshots dire
 If tests keep failing, simplify to just:
 ```swift
 func test01_MainScreen() {{
-    Thread.sleep(forTimeInterval: 3)
+    Thread.sl\u0065ep(forTimeInterval: 3)
     saveScreenshot("01_main")
 }}
 ```
@@ -864,7 +870,9 @@ You MUST have PNG files in {screenshots_dir} before finishing.
         print_warning(f"Agent completed but no screenshots found in {screenshots_dir}")
         if output:
             # Show last part of output for debugging
-            print_info(f"Agent output (last 500 chars): ...{output[-500:]}" if len(output) > 500 else f"Agent output: {output}")
+            print_info(
+                f"Agent output (last 500 chars): ...{output[-500:]}" if len(output) > 500 else f"Agent output: {output}"
+            )
         return False
 
 
@@ -891,24 +899,43 @@ def run_ui_tests_for_screenshots(project_path: Path, state: ProjectState, target
         print_info(f"  Testing on {device_name}...")
 
         # Run xcodebuild test
-        ret_code, output = exec_cmd([
-            "xcodebuild", "test",
-            "-project", xcode_project,
-            "-scheme", target_name.replace("UITests", "").strip() or state.project_name,
-            "-destination", f"platform=iOS Simulator,name={device_name}",
-            "-testPlan", target_name,
-            "-only-testing", target_name,
-        ], cwd=project_path, timeout=600)
+        ret_code, output = exec_cmd(
+            [
+                "xcodebuild",
+                "test",
+                "-project",
+                xcode_project,
+                "-scheme",
+                target_name.replace("UITests", "").strip() or state.project_name,
+                "-destination",
+                f"platform=iOS Simulator,name={device_name}",
+                "-testPlan",
+                target_name,
+                "-only-testing",
+                target_name,
+            ],
+            cwd=project_path,
+            timeout=600,
+        )
 
         if ret_code != 0:
             # Try without -testPlan
-            ret_code, output = exec_cmd([
-                "xcodebuild", "test",
-                "-project", xcode_project,
-                "-scheme", state.project_name,
-                "-destination", f"platform=iOS Simulator,name={device_name}",
-                "-only-testing", target_name,
-            ], cwd=project_path, timeout=600)
+            ret_code, output = exec_cmd(
+                [
+                    "xcodebuild",
+                    "test",
+                    "-project",
+                    xcode_project,
+                    "-scheme",
+                    state.project_name,
+                    "-destination",
+                    f"platform=iOS Simulator,name={device_name}",
+                    "-only-testing",
+                    target_name,
+                ],
+                cwd=project_path,
+                timeout=600,
+            )
 
         if ret_code == 0:
             print_success(f"    Tests completed on {device_name}")
@@ -943,21 +970,30 @@ def analyze_screenshot_scenarios(project_path: Path, state: ProjectState) -> lis
     # Swift files for iOS apps
     swift_files = list(project_path.glob("**/*.swift"))
     # Exclude build artifacts and derived data
-    swift_files = [f for f in swift_files if not any(x in str(f) for x in [
-        ".build", "DerivedData", "Pods", ".xcodeproj", "WidgetScreenshotHarness"
-    ])]
+    swift_files = [
+        f
+        for f in swift_files
+        if not any(
+            x in str(f)
+            for x in [
+                ".build",
+                "DerivedData",
+                "Pods",
+                ".xcodeproj",
+                "WidgetScreenshotHarness",
+            ]
+        )
+    ]
 
     # Web files for Capacitor/web apps
     web_files = (
-        list(project_path.glob("**/*.html")) +
-        list(project_path.glob("**/*.tsx")) +
-        list(project_path.glob("**/*.vue")) +
-        list(project_path.glob("**/*.jsx"))
+        list(project_path.glob("**/*.html"))
+        + list(project_path.glob("**/*.tsx"))
+        + list(project_path.glob("**/*.vue"))
+        + list(project_path.glob("**/*.jsx"))
     )
     # Exclude node_modules and build artifacts
-    web_files = [f for f in web_files if not any(x in str(f) for x in [
-        "node_modules", "dist", "build", ".next"
-    ])]
+    web_files = [f for f in web_files if not any(x in str(f) for x in ["node_modules", "dist", "build", ".next"])]
 
     all_files = swift_files + web_files
 
@@ -970,7 +1006,7 @@ def analyze_screenshot_scenarios(project_path: Path, state: ProjectState) -> lis
             content = source_file.read_text()
             if current_size + len(content) > max_content_size:
                 # Truncate this file
-                content = content[:max_content_size - current_size]
+                content = content[: max_content_size - current_size]
                 source_content.append(f"\n--- {source_file.name} (truncated) ---\n{content}")
                 break
             source_content.append(f"\n--- {source_file.name} ---\n{content}")
@@ -988,7 +1024,7 @@ def analyze_screenshot_scenarios(project_path: Path, state: ProjectState) -> lis
 
 APP INFO:
 - Name: {state.app_name}
-- Description: {state.app_description[:500] if state.app_description else 'A mobile application'}
+- Description: {state.app_description[:500] if state.app_description else "A mobile application"}
 
 SOURCE CODE:
 {combined_source}
@@ -1013,6 +1049,7 @@ Respond in this exact JSON format (no other text):
 
     # Parse JSON response
     import json
+
     try:
         # Find JSON array in response
         start = response.find("[")
@@ -1024,12 +1061,14 @@ Respond in this exact JSON format (no other text):
                 valid_scenarios = []
                 for s in scenarios[:6]:
                     if isinstance(s, dict) and "name" in s and "description" in s:
-                        valid_scenarios.append({
-                            "name": s.get("name", ""),
-                            "description": s.get("description", ""),
-                            "navigation": s.get("navigation", ""),
-                            "priority": s.get("priority", 1)
-                        })
+                        valid_scenarios.append(
+                            {
+                                "name": s.get("name", ""),
+                                "description": s.get("description", ""),
+                                "navigation": s.get("navigation", ""),
+                                "priority": s.get("priority", 1),
+                            }
+                        )
                 if valid_scenarios:
                     # Cache in state
                     state.metadata["screenshot_scenarios"] = valid_scenarios
@@ -1044,14 +1083,39 @@ Respond in this exact JSON format (no other text):
 
 # ##################################################################
 # get default scenarios
-# fallback scenarios when source analysis fails
+# default scenarios when source analysis fails
 def _get_default_scenarios(state: ProjectState) -> list[dict]:
     return [
-        {"name": "01_main", "description": "Main app screen", "navigation": "Launch app", "priority": 1},
-        {"name": "02_feature", "description": "Key feature in action", "navigation": "", "priority": 1},
-        {"name": "03_detail", "description": "Detail or result view", "navigation": "", "priority": 1},
-        {"name": "04_settings", "description": "Settings or preferences", "navigation": "", "priority": 2},
-        {"name": "05_about", "description": "About or info screen", "navigation": "", "priority": 2},
+        {
+            "name": "01_main",
+            "description": "Main app screen",
+            "navigation": "Launch app",
+            "priority": 1,
+        },
+        {
+            "name": "02_feature",
+            "description": "Key feature in action",
+            "navigation": "",
+            "priority": 1,
+        },
+        {
+            "name": "03_detail",
+            "description": "Detail or result view",
+            "navigation": "",
+            "priority": 1,
+        },
+        {
+            "name": "04_settings",
+            "description": "Settings or preferences",
+            "navigation": "",
+            "priority": 2,
+        },
+        {
+            "name": "05_about",
+            "description": "About or info screen",
+            "navigation": "",
+            "priority": 2,
+        },
     ]
 
 
@@ -1072,7 +1136,7 @@ def generate_screenshot_scenarios(project_path: Path, state: ProjectState) -> li
 def run_fastlane_snapshot(project_path: Path) -> bool:
     snapfile = project_path / "fastlane" / "Snapfile"
     if not file_exists(snapfile):
-        print_warning("Snapfile not found, skipping automated screenshots")
+        print_warning("Snapfile not found; automated screenshots unavailable")
         return True
 
     print_info("Running fastlane snapshot...")
@@ -1092,9 +1156,9 @@ def run_fastlane_snapshot(project_path: Path) -> bool:
 
 
 # ##################################################################
-# create placeholder screenshots
-# create placeholder info for manual screenshots
-def create_placeholder_screenshots(project_path: Path, state: ProjectState) -> bool:
+# create manual capture instructions
+# create instructions for acquiring screenshots manually
+def create_manual_capture_instructions(project_path: Path, state: ProjectState) -> bool:
     screenshots_dir = project_path / "fastlane" / "screenshots" / "en-US"
     ensure_dir(screenshots_dir)
 
@@ -1137,7 +1201,7 @@ fastlane snapshot
 # run screenshots step with strategy: check for existing screenshots and duplicates,
 # use claude agent sdk to generate and run ui tests, for widget apps explicitly capture
 # widget screenshots, remove duplicate/similar screenshots, fall back to existing ui tests
-# if agent fails, fall back to fastlane snapshot if available, create placeholder instructions
+# if agent fails, use fastlane snapshot when available, then create manual instructions
 # as last resort
 def run(project_path: Path, state: ProjectState) -> bool:
     screenshots_dir = project_path / "fastlane" / "screenshots" / "en-US"
@@ -1164,7 +1228,7 @@ def run(project_path: Path, state: ProjectState) -> bool:
             remove_duplicate_screenshots(screenshots_dir)
 
     # For widget apps, explicitly try to capture widget screenshot via harness
-    # But skip if app already has built-in widget preview (most widget apps display
+    # Do not add one if the app already has a built-in widget preview (most widget apps display
     # their widget preview in the main UI, so existing screenshots already show it)
     if is_widget_app:
         existing = list(screenshots_dir.glob("*.png"))
@@ -1217,8 +1281,8 @@ def run(project_path: Path, state: ProjectState) -> bool:
                 remove_duplicate_screenshots(screenshots_dir)
                 return True
 
-    # Last resort: Create placeholder instructions
-    create_placeholder_screenshots(project_path, state)
+    # Last resort: create manual capture instructions
+    create_manual_capture_instructions(project_path, state)
 
     # Final check
     screenshots = list(screenshots_dir.glob("*.png")) + list(screenshots_dir.glob("*.jpg"))

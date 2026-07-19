@@ -1,80 +1,255 @@
-import json
+import sys
 import time
+from dataclasses import dataclass
+from pathlib import Path
+from threading import Event
+from typing import Any
+
 import jwt
 import requests
-from pathlib import Path
-from datetime import datetime, timedelta
 
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from config import (
+    API_ISSUER_ID,
+    API_KEY_ID,
+    API_KEY_PATH,
+    CONTACT_EMAIL,
+    CONTACT_FIRST_NAME,
+    CONTACT_LAST_NAME,
+    CONTACT_PHONE,
+)
 from state import ProjectState, load_state, save_state
-from config import API_KEY_ID, API_ISSUER_ID, API_KEY_PATH, CONTACT_FIRST_NAME, CONTACT_LAST_NAME, CONTACT_EMAIL, CONTACT_PHONE
 from utils import (
+    llm_chat,
+    print_error,
     print_info,
     print_success,
     print_warning,
-    print_error,
-    run as exec_cmd,
-    file_exists,
-    dir_exists,
     read_file,
-    llm_chat,
+    run as exec_cmd,
 )
 
+API_BASE_URL = "https://api.appstoreconnect.apple.com/v1"
+LOCALES = ("en-US", "en-AU")
+REVIEW_FIELDS = {
+    "first_name.txt": "contactFirstName",
+    "last_name.txt": "contactLastName",
+    "phone_number.txt": "contactPhone",
+    "email_address.txt": "contactEmail",
+    "notes.txt": "notes",
+}
+VERSION_FIELDS = {
+    "description.txt": "description",
+    "keywords.txt": "keywords",
+    "promotional_text.txt": "promotionalText",
+    "marketing_url.txt": "marketingUrl",
+    "support_url.txt": "supportUrl",
+}
+APP_INFO_FIELDS = {
+    "name.txt": "name",
+    "subtitle.txt": "subtitle",
+    "privacy_url.txt": "privacyPolicyUrl",
+}
+DISPLAY_TYPES = {
+    "iPhone 16 Pro Max": "APP_IPHONE_67",
+    "iPhone-16-Pro-Max": "APP_IPHONE_67",
+    "iPhone 16 Plus": "APP_IPHONE_67",
+    "iPhone-16-Plus": "APP_IPHONE_67",
+    "iPad Pro 13-inch": "APP_IPAD_PRO_3GEN_129",
+    "iPad-Pro-13-inch": "APP_IPAD_PRO_3GEN_129",
+    "iPad Pro 11-inch": "APP_IPAD_PRO_3GEN_11",
+    "iPad-Pro-11-inch": "APP_IPAD_PRO_3GEN_11",
+}
+CATEGORY_IDS = {
+    "Games": "GAMES",
+    "Card": "GAMES_CARD",
+    "Card Games": "GAMES_CARD",
+    "Board": "GAMES_BOARD",
+    "Board Games": "GAMES_BOARD",
+    "Finance": "FINANCE",
+    "Utilities": "UTILITIES",
+    "Productivity": "PRODUCTIVITY",
+    "Entertainment": "ENTERTAINMENT",
+    "Education": "EDUCATION",
+    "Health & Fitness": "HEALTH_AND_FITNESS",
+    "Lifestyle": "LIFESTYLE",
+    "Music": "MUSIC",
+    "Photo & Video": "PHOTO_AND_VIDEO",
+    "Social Networking": "SOCIAL_NETWORKING",
+    "Sports": "SPORTS",
+    "Travel": "TRAVEL",
+    "Weather": "WEATHER",
+    "News": "NEWS",
+    "Reference": "REFERENCE",
+    "Business": "BUSINESS",
+    "Developer Tools": "DEVELOPER_TOOLS",
+    "Graphics & Design": "GRAPHICS_AND_DESIGN",
+    "Medical": "MEDICAL",
+    "Navigation": "NAVIGATION",
+    "Shopping": "SHOPPING",
+    "Food & Drink": "FOOD_AND_DRINK",
+    "Books": "BOOKS",
+}
 
-# ##################################################################
-# get commits since last release
-# get all commit messages since the last release tag
-def get_commits_since_release(project_path: Path) -> list[str]:
-    # look for release tags (v1.0, release-1.0, etc)
-    ret_code, output = exec_cmd(
-        ["git", "tag", "--sort=-creatordate"],
-        cwd=project_path,
+
+@dataclass(frozen=True)
+class RequestPlan:
+    method: str
+    endpoint: str
+    data: dict[str, Any] | None = None
+
+
+def relationship(resource_type: str, resource_id: str) -> dict[str, str]:
+    return {"type": resource_type, "id": resource_id}
+
+
+def resource_payload(
+    resource_type: str,
+    resource_id: str | None = None,
+    attributes: dict[str, Any] | None = None,
+    relationships: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    resource: dict[str, Any] = {"type": resource_type}
+    if resource_id is not None:
+        resource["id"] = resource_id
+    if attributes is not None:
+        resource["attributes"] = attributes
+    if relationships is not None:
+        resource["relationships"] = relationships
+    return {"data": resource}
+
+
+def first_data(response: dict | None) -> dict | None:
+    if not response:
+        return None
+    data = response.get("data")
+    if isinstance(data, list):
+        return data[0] if data else None
+    return data if isinstance(data, dict) else None
+
+
+def response_succeeded(response: dict | None) -> bool:
+    return response is not None
+
+
+def plan_get_app(bundle_id: str) -> RequestPlan:
+    return RequestPlan("GET", f"apps?filter[bundleId]={bundle_id}")
+
+
+def plan_get_versions(app_id: str, editable_only: bool = False) -> RequestPlan:
+    suffix = "?filter[appStoreState]=PREPARE_FOR_SUBMISSION" if editable_only else ""
+    return RequestPlan("GET", f"apps/{app_id}/appStoreVersions{suffix}")
+
+
+def plan_create_version(app_id: str, version_string: str, platform: str = "IOS") -> RequestPlan:
+    data = resource_payload(
+        "appStoreVersions",
+        attributes={"versionString": version_string, "platform": platform},
+        relationships={"app": {"data": relationship("apps", app_id)}},
+    )
+    return RequestPlan("POST", "appStoreVersions", data)
+
+
+def plan_update_resource(resource_type: str, resource_id: str, attributes: dict[str, Any]) -> RequestPlan:
+    return RequestPlan(
+        "PATCH",
+        f"{resource_type}/{resource_id}",
+        resource_payload(resource_type, resource_id, attributes),
     )
 
-    release_tag = None
-    if ret_code == 0 and output.strip():
-        tags = output.strip().split('\n')
-        for tag in tags:
-            # look for release tags
-            if tag.startswith('v') or tag.startswith('release') or tag.startswith('published'):
-                release_tag = tag
-                break
 
-    # get commits since tag (or all commits if no tag)
+def plan_build_query(app_id: str, state: str) -> RequestPlan:
+    endpoint = f"builds?filter[app]={app_id}&filter[processingState]={state}&sort=-uploadedDate&limit=1"
+    return RequestPlan("GET", endpoint)
+
+
+def plan_select_build(version_id: str, build_id: str) -> RequestPlan:
+    return RequestPlan(
+        "PATCH",
+        f"appStoreVersions/{version_id}/relationships/build",
+        {"data": relationship("builds", build_id)},
+    )
+
+
+def plan_localization(
+    kind: str,
+    parent_type: str,
+    parent_id: str,
+    locale: str,
+    localization_id: str | None = None,
+) -> RequestPlan:
+    if localization_id:
+        return RequestPlan("GET", f"{parent_type}/{parent_id}/{kind}?filter[locale]={locale}")
+    data = resource_payload(
+        kind,
+        attributes={"locale": locale},
+        relationships={parent_type[:-1]: {"data": relationship(parent_type, parent_id)}},
+    )
+    return RequestPlan("POST", kind, data)
+
+
+def plan_review_detail(version_id: str, contact_info: dict[str, Any], review_id: str | None = None) -> RequestPlan:
+    if review_id:
+        return plan_update_resource("appStoreReviewDetails", review_id, contact_info)
+    data = resource_payload(
+        "appStoreReviewDetails",
+        attributes=contact_info,
+        relationships={"appStoreVersion": {"data": relationship("appStoreVersions", version_id)}},
+    )
+    return RequestPlan("POST", "appStoreReviewDetails", data)
+
+
+def execute_plan(plan: RequestPlan, token: str) -> dict | None:
+    return api_request(plan.method, plan.endpoint, token, plan.data)
+
+
+def api_request(
+    method: str,
+    endpoint: str,
+    token: str,
+    data: dict | None = None,
+    base_url: str = API_BASE_URL,
+) -> dict | None:
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+    if method == "GET":
+        response = requests.get(url, headers=headers, timeout=60)
+    elif method == "POST":
+        response = requests.post(url, headers=headers, json=data, timeout=60)
+    elif method == "PATCH":
+        response = requests.patch(url, headers=headers, json=data, timeout=60)
+    elif method == "DELETE":
+        response = requests.delete(url, headers=headers, timeout=60)
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    if response.status_code >= 400:
+        print_warning(f"API error {response.status_code}: {response.text[:500]}")
+        return None
+    return response.json() if response.text else {}
+
+
+def get_commits_since_release(project_path: Path) -> list[str]:
+    ret_code, output = exec_cmd(["git", "tag", "--sort=-creatordate"], cwd=project_path)
+    tags = output.strip().splitlines() if ret_code == 0 else []
+    release_tag = next((tag for tag in tags if tag.startswith(("v", "release", "published"))), None)
     if release_tag:
         print_info(f"Getting commits since release tag: {release_tag}")
-        cmd = ["git", "log", f"{release_tag}..HEAD", "--oneline", "--no-merges"]
+        command = ["git", "log", f"{release_tag}..HEAD", "--oneline", "--no-merges"]
     else:
         print_info("No release tag found - using recent commits")
-        cmd = ["git", "log", "-20", "--oneline", "--no-merges"]
-
-    ret_code, output = exec_cmd(cmd, cwd=project_path)
-    if ret_code != 0 or not output.strip():
+        command = ["git", "log", "-20", "--oneline", "--no-merges"]
+    ret_code, output = exec_cmd(command, cwd=project_path)
+    if ret_code != 0:
         return []
-
-    # extract just the commit messages (remove hash)
-    commits = []
-    for line in output.strip().split('\n'):
-        if ' ' in line:
-            commits.append(line.split(' ', 1)[1])
-
-    return commits
-# ##################################################################
-# get commits since last release
+    return [line.split(" ", 1)[1] for line in output.strip().splitlines() if " " in line]
 
 
-# ##################################################################
-# generate whats new
-# use llm to generate user-friendly what's new from commits
 def generate_whats_new(commits: list[str], app_name: str) -> str:
     if not commits:
         return "Bug fixes and performance improvements."
-
-    commit_text = '\n'.join(f"- {c}" for c in commits)
-
-    prompt = f"""Based on these git commit messages for the app "{app_name}", write a very short "What's New"
+    commit_text = "\n".join(f"- {commit}" for commit in commits)
+    prompt = f'''Based on these git commit messages for the app "{app_name}", write a very short "What's New"
 for the App Store. Rules:
 - Write 1-3 bullet points MAXIMUM (prefer just 1 if possible)
 - Focus ONLY on the most significant USER-FACING changes
@@ -86,1422 +261,698 @@ for the App Store. Rules:
 Commit messages:
 {commit_text}
 
-Respond with ONLY the bullet points, starting each with •"""
-
+Respond with ONLY the bullet points, starting each with •'''
     result = llm_chat(prompt)
-    if result:
-        # clean up the response
-        result = result.strip()
-        # ensure it starts with bullet points
-        if not result.startswith('•'):
-            lines = result.split('\n')
-            result = '\n'.join(f"• {line.lstrip('•-* ')}" for line in lines if line.strip())
+    if not result:
+        return "• Bug fixes and performance improvements"
+    result = result.strip()
+    if result.startswith("•"):
         return result
-
-    return "• Bug fixes and performance improvements"
-# ##################################################################
-# generate whats new
+    return "\n".join(f"• {line.lstrip('•-* ')}" for line in result.splitlines() if line.strip())
 
 
 def get_api_token() -> str:
-    private_key = read_file(API_KEY_PATH)
-
-    header = {
-        "alg": "ES256",
-        "kid": API_KEY_ID,
-        "typ": "JWT"
-    }
-
+    now = int(time.time())
     payload = {
         "iss": API_ISSUER_ID,
-        "iat": int(time.time()),
-        "exp": int(time.time()) + 1200,  # 20 minutes
-        "aud": "appstoreconnect-v1"
+        "iat": now,
+        "exp": now + 1200,
+        "aud": "appstoreconnect-v1",
     }
-
-    return jwt.encode(payload, private_key, algorithm="ES256", headers=header)
-# ##################################################################
-# get api token
-# generate jwt token for app store connect api
-
-
-def api_request(method: str, endpoint: str, token: str, data: dict | None = None) -> dict | None:
-    base_url = "https://api.appstoreconnect.apple.com/v1"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-
-    url = f"{base_url}/{endpoint}"
-
-    if method == "GET":
-        resp = requests.get(url, headers=headers)
-    elif method == "POST":
-        resp = requests.post(url, headers=headers, json=data)
-    elif method == "PATCH":
-        resp = requests.patch(url, headers=headers, json=data)
-    elif method == "DELETE":
-        resp = requests.delete(url, headers=headers)
-    else:
-        raise ValueError(f"Unknown method: {method}")
-
-    if resp.status_code >= 400:
-        print_warning(f"API error {resp.status_code}: {resp.text[:500]}")
-        return None
-
-    if resp.text:
-        return resp.json()
-    return {}
-# ##################################################################
-# api request
-# make a request to app store connect api
+    headers = {"alg": "ES256", "kid": API_KEY_ID, "typ": "JWT"}
+    return jwt.encode(payload, read_file(API_KEY_PATH), algorithm="ES256", headers=headers)
 
 
 def get_app_id(token: str, bundle_id: str) -> str | None:
-    result = api_request("GET", f"apps?filter[bundleId]={bundle_id}", token)
-    if result and result.get("data"):
-        return result["data"][0]["id"]
-    return None
-# ##################################################################
-# get app id
-# get the app store connect app id for a bundle id
+    resource = first_data(execute_plan(plan_get_app(bundle_id), token))
+    return resource.get("id") if resource else None
 
 
 def get_app_store_version(token: str, app_id: str) -> dict | None:
-    result = api_request(
-        "GET",
-        f"apps/{app_id}/appStoreVersions?filter[appStoreState]=PREPARE_FOR_SUBMISSION",
-        token
+    return first_data(execute_plan(plan_get_versions(app_id, True), token))
+
+
+def version_key(resource: dict) -> tuple[int, ...]:
+    version = resource.get("attributes", {}).get("versionString", "")
+    return tuple(int(part) if part.isdigit() else 0 for part in version.split("."))
+
+
+def latest_version(response: dict | None) -> dict | None:
+    resources = response.get("data", []) if response else []
+    return max(resources, key=version_key) if resources else None
+
+
+def find_version(response: dict | None, target_version: str) -> dict | None:
+    resources = response.get("data", []) if response else []
+    return next(
+        (resource for resource in resources if resource.get("attributes", {}).get("versionString") == target_version),
+        None,
     )
-    if result and result.get("data"):
-        return result["data"][0]
-    return None
-# ##################################################################
-# get app store version
-# get the editable app store version (prepare_for_submission)
 
 
 def get_latest_app_store_version(token: str, app_id: str) -> dict | None:
-    result = api_request(
-        "GET",
-        f"apps/{app_id}/appStoreVersions",
-        token
-    )
-    if result and result.get("data"):
-        # find the highest version number
-        versions = result["data"]
-        if not versions:
-            return None
-
-        def version_key(v):
-            vs = v["attributes"]["versionString"]
-            # convert "1.2.3" to tuple (1, 2, 3) for comparison
-            parts = vs.split(".")
-            return tuple(int(p) if p.isdigit() else 0 for p in parts)
-
-        return max(versions, key=version_key)
-    return None
-# ##################################################################
-# get latest app store version
-# get the most recent app store version regardless of state
+    return latest_version(execute_plan(plan_get_versions(app_id), token))
 
 
 def increment_version(version_string: str) -> str:
-    # extract the major version number and increment it
-    # 1 -> 2, 1.0 -> 2, 1.0.0 -> 2
-    parts = version_string.split(".")
-    major = int(parts[0]) + 1
-    return str(major)
-# ##################################################################
-# increment version
-# increment version: 1 -> 2, 1.0 -> 2
+    return str(int(version_string.split(".")[0]) + 1)
 
 
 def create_app_store_version(token: str, app_id: str, version_string: str, platform: str = "IOS") -> dict | None:
     print_info(f"Creating new App Store version: {version_string}")
-
-    data = {
-        "data": {
-            "type": "appStoreVersions",
-            "attributes": {
-                "versionString": version_string,
-                "platform": platform
-            },
-            "relationships": {
-                "app": {
-                    "data": {
-                        "type": "apps",
-                        "id": app_id
-                    }
-                }
-            }
-        }
-    }
-
-    result = api_request("POST", "appStoreVersions", token, data)
-    if result and result.get("data"):
+    resource = first_data(execute_plan(plan_create_version(app_id, version_string, platform), token))
+    if resource:
         print_success(f"Created App Store version {version_string}")
-        return result["data"]
-    return None
-# ##################################################################
-# create app store version
-# create a new app store version for the app
+    return resource
 
 
 def update_app_store_version(token: str, version_id: str, attributes: dict) -> bool:
-    data = {
-        "data": {
-            "type": "appStoreVersions",
-            "id": version_id,
-            "attributes": attributes
-        }
-    }
-    result = api_request("PATCH", f"appStoreVersions/{version_id}", token, data)
-    return result is not None
-# ##################################################################
-# update app store version
-# update an app store version (copyright, etc.)
+    return response_succeeded(execute_plan(plan_update_resource("appStoreVersions", version_id, attributes), token))
 
 
 def get_latest_valid_build(token: str, app_id: str, wait_for_processing: bool = True) -> dict | None:
-    # first try to get a valid build
-    result = api_request(
-        "GET",
-        f"builds?filter[app]={app_id}&filter[processingState]=VALID&sort=-uploadedDate&limit=1",
-        token
-    )
-    if result and result.get("data"):
-        return result["data"][0]
-
-    if not wait_for_processing:
-        return None
-
-    # check for processing builds and wait
-    for attempt in range(30):  # wait up to 5 minutes (30 * 10 seconds)
-        result = api_request(
-            "GET",
-            f"builds?filter[app]={app_id}&filter[processingState]=PROCESSING&sort=-uploadedDate&limit=1",
-            token
-        )
-
-        if result and result.get("data"):
-            build = result["data"][0]
-            build_version = build["attributes"]["version"]
-            if attempt == 0:
-                print_info(f"Build {build_version} is still processing, waiting...")
-            elif attempt % 6 == 0:  # log every minute
-                print_info(f"  Still waiting for build {build_version} to process...")
-
-            time.sleep(10)
-
-            # check if it became valid
-            result = api_request(
-                "GET",
-                f"builds?filter[app]={app_id}&filter[processingState]=VALID&sort=-uploadedDate&limit=1",
-                token
-            )
-            if result and result.get("data"):
-                return result["data"][0]
+    resource = first_data(execute_plan(plan_build_query(app_id, "VALID"), token))
+    if resource or not wait_for_processing:
+        return resource
+    for attempt in range(30):
+        processing = first_data(execute_plan(plan_build_query(app_id, "PROCESSING"), token))
+        if processing:
+            version = processing["attributes"]["version"]
+            if attempt == 0 or attempt % 6 == 0:
+                print_info(f"Build {version} is still processing, waiting...")
+            Event().wait(10)
+            resource = first_data(execute_plan(plan_build_query(app_id, "VALID"), token))
+            if resource:
+                return resource
+        elif attempt < 3:
+            print_info("Waiting for build to appear in App Store Connect...")
+            Event().wait(10)
         else:
-            # no processing builds either - maybe just uploaded
-            if attempt < 3:
-                print_info("Waiting for build to appear in App Store Connect...")
-                time.sleep(10)
-            else:
-                break
-
+            break
     return None
-# ##################################################################
-# get latest valid build
-# get the latest valid build for an app, optionally waiting for processing builds
 
 
 def get_build_for_version(token: str, version_id: str) -> dict | None:
-    result = api_request("GET", f"appStoreVersions/{version_id}/build", token)
-    if result and result.get("data"):
-        return result["data"]
-    return None
-# ##################################################################
-# get build for version
-# get the build currently associated with a version
+    return first_data(api_request("GET", f"appStoreVersions/{version_id}/build", token))
 
 
 def select_build_for_version(token: str, version_id: str, build_id: str) -> bool:
-    data = {
-        "data": {
-            "type": "builds",
-            "id": build_id
-        }
-    }
-    result = api_request("PATCH", f"appStoreVersions/{version_id}/relationships/build", token, data)
-    return result is not None
-# ##################################################################
-# select build for version
-# select a build for an app store version
+    return response_succeeded(execute_plan(plan_select_build(version_id, build_id), token))
 
 
 def set_export_compliance(token: str, build_id: str, uses_encryption: bool = False) -> bool:
-    data = {
-        "data": {
-            "type": "builds",
-            "id": build_id,
-            "attributes": {
-                "usesNonExemptEncryption": uses_encryption
-            }
-        }
-    }
-    result = api_request("PATCH", f"builds/{build_id}", token, data)
-    return result is not None
-# ##################################################################
-# set export compliance
-# set export compliance for a build
-
-
-def get_version_localization(token: str, version_id: str, locale: str = "en-US") -> dict | None:
-    result = api_request(
-        "GET",
-        f"appStoreVersions/{version_id}/appStoreVersionLocalizations?filter[locale]={locale}",
-        token
-    )
-    if result and result.get("data"):
-        return result["data"][0]
-
-    # localization doesn't exist - create it
-    print_info(f"Creating version localization for {locale}...")
-    create_data = {
-        "data": {
-            "type": "appStoreVersionLocalizations",
-            "attributes": {
-                "locale": locale
-            },
-            "relationships": {
-                "appStoreVersion": {
-                    "data": {
-                        "type": "appStoreVersions",
-                        "id": version_id
-                    }
-                }
-            }
-        }
-    }
-
-    result = api_request("POST", "appStoreVersionLocalizations", token, create_data)
-    if result and result.get("data"):
-        print_success(f"Created version localization for {locale}")
-        return result["data"]
-
-    return None
-# ##################################################################
-# get version localization
-# get the localization for a version, creating it if it doesn't exist
-
-
-def update_version_localization(token: str, localization_id: str, metadata: dict) -> bool:
-    data = {
-        "data": {
-            "type": "appStoreVersionLocalizations",
-            "id": localization_id,
-            "attributes": metadata
-        }
-    }
-
-    result = api_request("PATCH", f"appStoreVersionLocalizations/{localization_id}", token, data)
-    return result is not None
-# ##################################################################
-# update version localization
-# update version localization metadata
-
-
-def get_app_info_localization(token: str, app_id: str, locale: str = "en-US") -> dict | None:
-    result = api_request("GET", f"apps/{app_id}/appInfos", token)
-    if not result or not result.get("data"):
-        return None
-
-    app_info_id = result["data"][0]["id"]
-
-    result = api_request(
-        "GET",
-        f"appInfos/{app_info_id}/appInfoLocalizations?filter[locale]={locale}",
-        token
-    )
-    if result and result.get("data"):
-        loc = result["data"][0]
-        loc["_app_info_id"] = app_info_id
-        return loc
-
-    # localization doesn't exist - create it
-    print_info(f"Creating app info localization for {locale}...")
-    create_data = {
-        "data": {
-            "type": "appInfoLocalizations",
-            "attributes": {
-                "locale": locale
-            },
-            "relationships": {
-                "appInfo": {
-                    "data": {
-                        "type": "appInfos",
-                        "id": app_info_id
-                    }
-                }
-            }
-        }
-    }
-
-    result = api_request("POST", "appInfoLocalizations", token, create_data)
-    if result and result.get("data"):
-        print_success(f"Created app info localization for {locale}")
-        loc = result["data"]
-        loc["_app_info_id"] = app_info_id
-        return loc
-
-    return None
-# ##################################################################
-# get app info localization
-# get app info localization (for name, subtitle, privacy url), creating if needed
-
-
-def update_app_info_localization(token: str, localization_id: str, metadata: dict) -> bool:
-    data = {
-        "data": {
-            "type": "appInfoLocalizations",
-            "id": localization_id,
-            "attributes": metadata
-        }
-    }
-
-    result = api_request("PATCH", f"appInfoLocalizations/{localization_id}", token, data)
-    return result is not None
-# ##################################################################
-# update app info localization
-# update app info localization (name, subtitle, privacy url)
-
-
-def get_review_detail(token: str, version_id: str) -> dict | None:
-    result = api_request("GET", f"appStoreVersions/{version_id}/appStoreReviewDetail", token)
-    if result and result.get("data"):
-        return result["data"]
-    return None
-# ##################################################################
-# get review detail
-# get app store review detail
-
-
-def create_review_detail(token: str, version_id: str, contact_info: dict) -> bool:
-    data = {
-        "data": {
-            "type": "appStoreReviewDetails",
-            "attributes": contact_info,
-            "relationships": {
-                "appStoreVersion": {
-                    "data": {
-                        "type": "appStoreVersions",
-                        "id": version_id
-                    }
-                }
-            }
-        }
-    }
-
-    result = api_request("POST", "appStoreReviewDetails", token, data)
-    return result is not None
-# ##################################################################
-# create review detail
-# create app store review detail
-
-
-def update_review_detail(token: str, review_detail_id: str, contact_info: dict) -> bool:
-    data = {
-        "data": {
-            "type": "appStoreReviewDetails",
-            "id": review_detail_id,
-            "attributes": contact_info
-        }
-    }
-
-    result = api_request("PATCH", f"appStoreReviewDetails/{review_detail_id}", token, data)
-    return result is not None
-# ##################################################################
-# update review detail
-# update app store review detail
-
-
-def upload_ipa_altool(ipa_path: Path) -> bool:
-    print_info(f"Uploading {ipa_path.name} via altool...")
-
-    ret_code, output = exec_cmd([
-        "xcrun", "altool",
-        "--upload-app",
-        "-f", str(ipa_path),
-        "-t", "ios",
-        "--apiKey", API_KEY_ID,
-        "--apiIssuer", API_ISSUER_ID,
-    ], timeout=600)
-
-    if ret_code != 0:
-        print_error(f"Upload failed: {output}")
-        return False
-
-    print_success("IPA uploaded successfully")
-    return True
-# ##################################################################
-# upload ipa altool
-# upload ipa using altool
+    plan = plan_update_resource("builds", build_id, {"usesNonExemptEncryption": uses_encryption})
+    return response_succeeded(execute_plan(plan, token))
 
 
 def ensure_build_selected(token: str, app_id: str, version_id: str) -> bool:
     print_info("Checking build selection...")
-
-    # get latest valid build
-    latest_build = get_latest_valid_build(token, app_id)
-    if not latest_build:
+    latest = get_latest_valid_build(token, app_id)
+    if not latest:
         print_warning("No valid builds found")
         return False
-
-    latest_build_id = latest_build["id"]
-    latest_build_version = latest_build["attributes"]["version"]
-
-    # get currently selected build
-    current_build = get_build_for_version(token, version_id)
-    current_build_id = current_build["id"] if current_build else None
-
-    if current_build_id == latest_build_id:
-        print_info(f"Build {latest_build_version} already selected")
-    else:
-        print_info(f"Selecting build {latest_build_version} for version...")
-        if select_build_for_version(token, version_id, latest_build_id):
-            print_success(f"Build {latest_build_version} selected")
-        else:
+    current = get_build_for_version(token, version_id)
+    if not current or current["id"] != latest["id"]:
+        if not select_build_for_version(token, version_id, latest["id"]):
             print_error("Failed to select build")
             return False
-
-    # set export compliance if needed
-    uses_encryption = latest_build["attributes"].get("usesNonExemptEncryption")
-    if uses_encryption is None:
-        print_info("Setting export compliance (no encryption)...")
-        if set_export_compliance(token, latest_build_id, False):
+        print_success(f"Build {latest['attributes']['version']} selected")
+    if latest["attributes"].get("usesNonExemptEncryption") is None:
+        if set_export_compliance(token, latest["id"]):
             print_success("Export compliance set")
         else:
             print_warning("Failed to set export compliance - may need manual approval")
-
     return True
-# ##################################################################
-# ensure build selected
-# ensure the latest valid build is selected for the version
+
+
+def localization_request(kind: str, parent_type: str, parent_id: str, locale: str, token: str) -> dict | None:
+    get_plan = plan_localization(kind, parent_type, parent_id, locale, "lookup")
+    resource = first_data(execute_plan(get_plan, token))
+    if resource:
+        return resource
+    print_info(f"Creating {kind} for {locale}...")
+    resource = first_data(execute_plan(plan_localization(kind, parent_type, parent_id, locale), token))
+    if resource:
+        print_success(f"Created {kind} for {locale}")
+    return resource
+
+
+def get_version_localization(token: str, version_id: str, locale: str = "en-US") -> dict | None:
+    return localization_request("appStoreVersionLocalizations", "appStoreVersions", version_id, locale, token)
+
+
+def update_version_localization(token: str, localization_id: str, metadata: dict) -> bool:
+    plan = plan_update_resource("appStoreVersionLocalizations", localization_id, metadata)
+    return response_succeeded(execute_plan(plan, token))
+
+
+def get_app_info_localization(token: str, app_id: str, locale: str = "en-US") -> dict | None:
+    app_info = first_data(api_request("GET", f"apps/{app_id}/appInfos", token))
+    if not app_info:
+        return None
+    resource = localization_request("appInfoLocalizations", "appInfos", app_info["id"], locale, token)
+    if resource:
+        resource["_app_info_id"] = app_info["id"]
+    return resource
+
+
+def update_app_info_localization(token: str, localization_id: str, metadata: dict) -> bool:
+    plan = plan_update_resource("appInfoLocalizations", localization_id, metadata)
+    return response_succeeded(execute_plan(plan, token))
+
+
+def get_review_detail(token: str, version_id: str) -> dict | None:
+    return first_data(api_request("GET", f"appStoreVersions/{version_id}/appStoreReviewDetail", token))
+
+
+def create_review_detail(token: str, version_id: str, contact_info: dict) -> bool:
+    return response_succeeded(execute_plan(plan_review_detail(version_id, contact_info), token))
+
+
+def update_review_detail(token: str, review_detail_id: str, contact_info: dict) -> bool:
+    plan = plan_review_detail("", contact_info, review_detail_id)
+    return response_succeeded(execute_plan(plan, token))
+
+
+def altool_command(ipa_path: Path) -> list[str]:
+    return [
+        "xcrun",
+        "altool",
+        "--upload-app",
+        "-f",
+        str(ipa_path),
+        "-t",
+        "ios",
+        "--apiKey",
+        API_KEY_ID,
+        "--apiIssuer",
+        API_ISSUER_ID,
+    ]
+
+
+def upload_ipa_altool(ipa_path: Path) -> bool:
+    print_info(f"Uploading {ipa_path.name} via altool...")
+    ret_code, output = exec_cmd(altool_command(ipa_path), timeout=600)
+    if ret_code != 0:
+        print_error(f"Upload failed: {output}")
+        return False
+    print_success("IPA uploaded successfully")
+    return True
 
 
 def normalize_phone_number(phone: str) -> str:
-    if not phone:
-        return phone
-    # remove all non-digit characters except leading +
-    has_plus = phone.startswith('+')
-    digits = ''.join(c for c in phone if c.isdigit())
-    return ('+' if has_plus else '+') + digits
-# ##################################################################
-# normalize phone number
-# normalize phone number to api-compatible format (+xxxxxxxxxxx)
+    return f"+{''.join(character for character in phone if character.isdigit())}" if phone else phone
+
+
+def read_text_fields(directory: Path, fields: dict[str, str], normalize_phone: bool = False) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not directory.is_dir():
+        return values
+    for filename, field in fields.items():
+        path = directory / filename
+        if not path.is_file():
+            continue
+        content = path.read_text().strip()
+        if content:
+            values[field] = normalize_phone_number(content) if normalize_phone and field == "contactPhone" else content
+    return values
+
+
+def review_contact(project_path: Path, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+    contact = (
+        defaults.copy()
+        if defaults
+        else {
+            "contactFirstName": CONTACT_FIRST_NAME,
+            "contactLastName": CONTACT_LAST_NAME,
+            "contactPhone": CONTACT_PHONE,
+            "contactEmail": CONTACT_EMAIL,
+            "demoAccountRequired": False,
+            "notes": "",
+        }
+    )
+    root = project_path / "fastlane" / "metadata"
+    contact.update(read_text_fields(root / "review_info", REVIEW_FIELDS))
+    contact.update(read_text_fields(root / "en-US" / "review_information", REVIEW_FIELDS, True))
+    return contact
 
 
 def ensure_review_detail(token: str, version_id: str, project_path: Path) -> bool:
     print_info("Checking review details...")
-
-    review_info_path = project_path / "fastlane" / "metadata" / "review_info"
-    contact_info = {
-        "contactFirstName": CONTACT_FIRST_NAME,
-        "contactLastName": CONTACT_LAST_NAME,
-        "contactPhone": CONTACT_PHONE,
-        "contactEmail": CONTACT_EMAIL,
-        "demoAccountRequired": False,
-        "notes": ""
-    }
-
-    # try to load from files
-    if dir_exists(review_info_path):
-        fields = {
-            "first_name.txt": "contactFirstName",
-            "last_name.txt": "contactLastName",
-            "phone_number.txt": "contactPhone",
-            "email_address.txt": "contactEmail",
-            "notes.txt": "notes"
-        }
-        for filename, field in fields.items():
-            filepath = review_info_path / filename
-            if file_exists(filepath):
-                content = read_file(filepath).strip()
-                if content:
-                    contact_info[field] = content
-
-    # also check en-us review_information
-    en_review_path = project_path / "fastlane" / "metadata" / "en-US" / "review_information"
-    if dir_exists(en_review_path):
-        fields = {
-            "first_name.txt": "contactFirstName",
-            "last_name.txt": "contactLastName",
-            "phone_number.txt": "contactPhone",
-            "email_address.txt": "contactEmail",
-            "notes.txt": "notes"
-        }
-        for filename, field in fields.items():
-            filepath = en_review_path / filename
-            if file_exists(filepath):
-                content = read_file(filepath).strip()
-                if content:
-                    # normalize phone number format
-                    if field == "contactPhone":
-                        content = normalize_phone_number(content)
-                    contact_info[field] = content
-
-    # check if review detail exists
+    contact = review_contact(project_path)
     existing = get_review_detail(token, version_id)
-    if existing:
-        # update if needed
-        print_info("Updating review details...")
-        if update_review_detail(token, existing["id"], contact_info):
-            print_success("Review details updated")
-        else:
-            print_warning("Failed to update review details")
-    else:
-        # create new
-        print_info("Creating review details...")
-        if create_review_detail(token, version_id, contact_info):
-            print_success("Review details created")
-        else:
-            print_warning("Failed to create review details")
-
+    success = (
+        update_review_detail(token, existing["id"], contact)
+        if existing
+        else create_review_detail(token, version_id, contact)
+    )
+    if not success:
+        print_warning("Failed to save review details")
     return True
-# ##################################################################
-# ensure review detail
-# ensure review details are set up
+
+
+def metadata_updates(directory: Path, fields: dict[str, str], current: dict[str, Any]) -> dict[str, str]:
+    local = read_text_fields(directory, fields)
+    return {field: value for field, value in local.items() if value != (current.get(field, "") or "")}
+
+
+def metadata_directories(project_path: Path) -> list[tuple[str, Path]]:
+    root = project_path / "fastlane" / "metadata"
+    primary = root / "en-US"
+    if not primary.is_dir():
+        return []
+    return [(locale, root / locale if (root / locale).is_dir() else primary) for locale in LOCALES]
 
 
 def upload_metadata_api(project_path: Path, state: ProjectState, token: str, version_id: str, app_id: str) -> bool:
-    # support multiple locales - en-us is primary, en-au is secondary
-    locales = ["en-US", "en-AU"]
-    base_metadata_dir = project_path / "fastlane" / "metadata"
-
-    # handle version-level fields (not localized) - copyright
-    en_us_metadata = base_metadata_dir / "en-US"
-    copyright_file = en_us_metadata / "copyright.txt"
-    if file_exists(copyright_file):
-        copyright_text = read_file(copyright_file).strip()
-        if copyright_text:
-            # get current version to check existing copyright
-            version_data = api_request("GET", f"appStoreVersions/{version_id}", token)
-            current_copyright = ""
-            if version_data and version_data.get("data"):
-                current_copyright = version_data["data"].get("attributes", {}).get("copyright", "") or ""
-
-            if copyright_text != current_copyright:
-                print_info(f"  copyright: needs update")
-                if update_app_store_version(token, version_id, {"copyright": copyright_text}):
-                    print_success("Copyright updated")
-                else:
-                    print_warning("Failed to update copyright")
-            else:
-                print_info(f"  copyright: up to date")
-
-    success = True
-    for locale in locales:
-        metadata_dir = base_metadata_dir / locale
-
-        if not dir_exists(metadata_dir):
-            if locale == "en-US":
-                print_warning("No metadata directory found")
-                return True
-            # for secondary locales, try to use en-us as fallback
-            metadata_dir = base_metadata_dir / "en-US"
-            if not dir_exists(metadata_dir):
-                continue
-
-        print_info(f"Checking metadata for {locale}...")
-        if not upload_metadata_for_locale(project_path, state, token, version_id, app_id, locale, metadata_dir):
-            success = False
-
-    return success
-# ##################################################################
-# upload metadata api
-# upload metadata using app store connect api directly for all supported locales
+    directories = metadata_directories(project_path)
+    if not directories:
+        print_warning("No metadata directory found")
+        return True
+    copyright_path = directories[0][1] / "copyright.txt"
+    if copyright_path.is_file() and copyright_path.read_text().strip():
+        value = copyright_path.read_text().strip()
+        version = first_data(api_request("GET", f"appStoreVersions/{version_id}", token)) or {}
+        current = version.get("attributes", {}).get("copyright", "") or ""
+        if value != current:
+            update_app_store_version(token, version_id, {"copyright": value})
+    return all(
+        upload_metadata_for_locale(project_path, state, token, version_id, app_id, locale, directory)
+        for locale, directory in directories
+    )
 
 
-def upload_metadata_for_locale(project_path: Path, state: ProjectState, token: str, version_id: str, app_id: str, locale: str, metadata_dir: Path) -> bool:
-    # get version localization for this locale
-    version_loc = get_version_localization(token, version_id, locale)
-    if not version_loc:
+def upload_metadata_for_locale(
+    project_path: Path,
+    state: ProjectState,
+    token: str,
+    version_id: str,
+    app_id: str,
+    locale: str,
+    metadata_dir: Path,
+) -> bool:
+    version = get_version_localization(token, version_id, locale)
+    if not version:
         print_error(f"Could not find/create version localization for {locale}")
         return False
-
-    loc_id = version_loc["id"]
-    current_attrs = version_loc.get("attributes", {})
-
-    # load metadata from files and compare
-    version_fields = {
-        "description.txt": "description",
-        "keywords.txt": "keywords",
-        "promotional_text.txt": "promotionalText",
-        "marketing_url.txt": "marketingUrl",
-        "support_url.txt": "supportUrl",
-    }
-
-    updates = {}
-    for filename, field in version_fields.items():
-        filepath = metadata_dir / filename
-        if file_exists(filepath):
-            content = read_file(filepath).strip()
-            if content:
-                current_value = current_attrs.get(field, "") or ""
-                if content != current_value:
-                    updates[field] = content
-                    print_info(f"  {field}: needs update")
-                else:
-                    print_info(f"  {field}: up to date")
-
-    # generate what's new from git commits (for updates, not first release)
-    current_whats_new = current_attrs.get("whatsNew", "") or ""
-    if not current_whats_new or current_whats_new == "Bug fixes and performance improvements.":
-        print_info("Generating 'What's New' from git history...")
+    updates = metadata_updates(metadata_dir, VERSION_FIELDS, version.get("attributes", {}))
+    current_news = version.get("attributes", {}).get("whatsNew", "") or ""
+    if not current_news or current_news == "Bug fixes and performance improvements.":
         commits = get_commits_since_release(project_path)
-        if commits:
-            whats_new = generate_whats_new(commits, state.app_name)
-            print_info(f"Generated: {whats_new}")
-            updates["whatsNew"] = whats_new
-        else:
-            # no commits found, use default
-            updates["whatsNew"] = "• Bug fixes and performance improvements"
-
-    # update version localization if needed
-    if updates:
-        print_info(f"Updating version metadata: {list(updates.keys())}")
-        if update_version_localization(token, loc_id, updates):
-            print_success("Version metadata updated")
-        else:
-            print_warning("Failed to update version metadata")
-
-    # get and update app info localization (name, subtitle, privacy url)
-    app_info_loc = get_app_info_localization(token, app_id, locale)
-    if app_info_loc:
-        current_attrs = app_info_loc.get("attributes", {})
-        app_info_fields = {
-            "name.txt": "name",
-            "subtitle.txt": "subtitle",
-            "privacy_url.txt": "privacyPolicyUrl",
-        }
-
-        updates = {}
-        for filename, field in app_info_fields.items():
-            filepath = metadata_dir / filename
-            if file_exists(filepath):
-                content = read_file(filepath).strip()
-                if content:
-                    current_value = current_attrs.get(field, "") or ""
-                    if content != current_value:
-                        updates[field] = content
-                        print_info(f"  {field}: needs update")
-                    else:
-                        print_info(f"  {field}: up to date")
-
-        if updates:
-            print_info(f"Updating app info: {list(updates.keys())}")
-            if update_app_info_localization(token, app_info_loc["id"], updates):
-                print_success("App info updated")
-            else:
-                print_warning("Failed to update app info")
-
+        updates["whatsNew"] = (
+            generate_whats_new(commits, state.app_name) if commits else "• Bug fixes and performance improvements"
+        )
+    if updates and not update_version_localization(token, version["id"], updates):
+        print_warning("Failed to update version metadata")
+    app_info = get_app_info_localization(token, app_id, locale)
+    if app_info:
+        updates = metadata_updates(metadata_dir, APP_INFO_FIELDS, app_info.get("attributes", {}))
+        if updates and not update_app_info_localization(token, app_info["id"], updates):
+            print_warning("Failed to update app info")
     return True
-# ##################################################################
-# upload metadata for locale
-# upload metadata for a specific locale
+
+
+def parse_screenshot_sets(set_response: dict | None, screenshot_responses: dict[str, dict | None]) -> dict:
+    parsed: dict[str, dict[str, Any]] = {}
+    for item in (set_response or {}).get("data", []):
+        display_type = item["attributes"]["screenshotDisplayType"]
+        screenshots = []
+        for screenshot in (screenshot_responses.get(item["id"]) or {}).get("data", []):
+            attributes = screenshot.get("attributes", {})
+            screenshots.append(
+                {
+                    "id": screenshot["id"],
+                    "filename": attributes.get("fileName"),
+                    "state": attributes.get("assetDeliveryState", {}).get("state"),
+                }
+            )
+        parsed[display_type] = {"id": item["id"], "screenshots": screenshots}
+    return parsed
 
 
 def get_screenshot_sets(token: str, localization_id: str) -> dict:
-    result = api_request("GET", f"appStoreVersionLocalizations/{localization_id}/appScreenshotSets", token)
-    if not result or not result.get("data"):
-        return {}
+    response = api_request(
+        "GET",
+        f"appStoreVersionLocalizations/{localization_id}/appScreenshotSets",
+        token,
+    )
+    screenshot_responses = {}
+    for item in (response or {}).get("data", []):
+        screenshot_responses[item["id"]] = api_request("GET", f"appScreenshotSets/{item['id']}/appScreenshots", token)
+    return parse_screenshot_sets(response, screenshot_responses)
 
-    # map display type to set info
-    sets = {}
-    for s in result["data"]:
-        display_type = s["attributes"]["screenshotDisplayType"]
-        sets[display_type] = {"id": s["id"], "screenshots": []}
 
-        # get screenshots in this set
-        ss_result = api_request("GET", f"appScreenshotSets/{s['id']}/appScreenshots", token)
-        if ss_result and ss_result.get("data"):
-            for ss in ss_result["data"]:
-                sets[display_type]["screenshots"].append({
-                    "id": ss["id"],
-                    "filename": ss["attributes"].get("fileName"),
-                    "state": ss["attributes"].get("assetDeliveryState", {}).get("state")
-                })
-
-    return sets
-# ##################################################################
-# get screenshot sets
-# get screenshot sets for a version localization
+def plan_create_screenshot_set(localization_id: str, display_type: str) -> RequestPlan:
+    data = resource_payload(
+        "appScreenshotSets",
+        attributes={"screenshotDisplayType": display_type},
+        relationships={
+            "appStoreVersionLocalization": {"data": relationship("appStoreVersionLocalizations", localization_id)}
+        },
+    )
+    return RequestPlan("POST", "appScreenshotSets", data)
 
 
 def create_screenshot_set(token: str, localization_id: str, display_type: str) -> str | None:
-    data = {
-        "data": {
-            "type": "appScreenshotSets",
-            "attributes": {
-                "screenshotDisplayType": display_type
-            },
-            "relationships": {
-                "appStoreVersionLocalization": {
-                    "data": {
-                        "type": "appStoreVersionLocalizations",
-                        "id": localization_id
-                    }
-                }
-            }
-        }
-    }
-
-    result = api_request("POST", "appScreenshotSets", token, data)
-    if result and result.get("data"):
-        return result["data"]["id"]
-    return None
-# ##################################################################
-# create screenshot set
-# create a screenshot set for a display type
+    resource = first_data(execute_plan(plan_create_screenshot_set(localization_id, display_type), token))
+    return resource.get("id") if resource else None
 
 
 def delete_screenshot(token: str, screenshot_id: str) -> bool:
-    result = api_request("DELETE", f"appScreenshots/{screenshot_id}", token)
-    return result is not None
-# ##################################################################
-# delete screenshot
-# delete a screenshot
+    return response_succeeded(api_request("DELETE", f"appScreenshots/{screenshot_id}", token))
+
+
+def screenshot_reservation(screenshot_set_id: str, filepath: Path) -> RequestPlan:
+    data = resource_payload(
+        "appScreenshots",
+        attributes={"fileName": filepath.name, "fileSize": filepath.stat().st_size},
+        relationships={"appScreenshotSet": {"data": relationship("appScreenshotSets", screenshot_set_id)}},
+    )
+    return RequestPlan("POST", "appScreenshots", data)
+
+
+def screenshot_commit(resource: dict) -> RequestPlan:
+    attributes = resource.get("attributes", {})
+    data = resource_payload(
+        "appScreenshots",
+        resource["id"],
+        {"uploaded": True, "sourceFileChecksum": attributes.get("sourceFileChecksum")},
+    )
+    return RequestPlan("PATCH", f"appScreenshots/{resource['id']}", data)
+
+
+def upload_parts(file_data: bytes, operations: list[dict]) -> bool:
+    for operation in operations:
+        headers = {header["name"]: header["value"] for header in operation["requestHeaders"]}
+        offset, length = operation["offset"], operation["length"]
+        response = requests.put(
+            operation["url"],
+            headers=headers,
+            data=file_data[offset : offset + length],
+            timeout=60,
+        )
+        if response.status_code >= 400:
+            print_warning(f"Upload chunk failed: {response.status_code}")
+            return False
+    return True
 
 
 def upload_screenshot(token: str, screenshot_set_id: str, filepath: Path) -> bool:
-    filesize = filepath.stat().st_size
-    filename = filepath.name
-
-    data = {
-        "data": {
-            "type": "appScreenshots",
-            "attributes": {
-                "fileName": filename,
-                "fileSize": filesize
-            },
-            "relationships": {
-                "appScreenshotSet": {
-                    "data": {
-                        "type": "appScreenshotSets",
-                        "id": screenshot_set_id
-                    }
-                }
-            }
-        }
-    }
-
-    result = api_request("POST", "appScreenshots", token, data)
-    if not result:
+    resource = first_data(execute_plan(screenshot_reservation(screenshot_set_id, filepath), token))
+    if not resource:
         return False
-
-    screenshot_id = result["data"]["id"]
-    upload_ops = result["data"]["attributes"].get("uploadOperations", [])
-
-    if not upload_ops:
-        print_warning(f"No upload operations for {filename}")
+    operations = resource.get("attributes", {}).get("uploadOperations", [])
+    if not operations:
+        print_warning(f"No upload operations for {filepath.name}")
         return False
+    if not upload_parts(filepath.read_bytes(), operations):
+        return False
+    return response_succeeded(execute_plan(screenshot_commit(resource), token))
 
-    # upload the file parts
-    with open(filepath, "rb") as f:
-        file_data = f.read()
 
-    for op in upload_ops:
-        url = op["url"]
-        headers = {h["name"]: h["value"] for h in op["requestHeaders"]}
-        offset = op["offset"]
-        length = op["length"]
+def group_screenshots(screenshots: list[Path]) -> dict[str, list[Path]]:
+    grouped: dict[str, list[Path]] = {}
+    for screenshot in screenshots:
+        display_type = next(
+            (value for prefix, value in DISPLAY_TYPES.items() if prefix in screenshot.stem),
+            None,
+        )
+        if display_type:
+            grouped.setdefault(display_type, []).append(screenshot)
+    return grouped
 
-        chunk = file_data[offset:offset + length]
-        resp = requests.put(url, headers=headers, data=chunk)
 
-        if resp.status_code >= 400:
-            print_warning(f"Upload chunk failed: {resp.status_code}")
-            return False
-
-    # commit the upload
-    commit_data = {
-        "data": {
-            "type": "appScreenshots",
-            "id": screenshot_id,
-            "attributes": {
-                "uploaded": True,
-                "sourceFileChecksum": result["data"]["attributes"].get("sourceFileChecksum")
-            }
-        }
+def screenshot_actions(files: list[Path], set_info: dict | None, limit: int = 10) -> dict[str, Any]:
+    info = set_info or {"id": None, "screenshots": []}
+    existing = info.get("screenshots", [])
+    failed = [item["id"] for item in existing if item.get("state") == "FAILED"]
+    complete = [item for item in existing if item.get("state") == "COMPLETE"]
+    filenames = {item.get("filename") for item in complete}
+    pending = [path for path in files if path.name not in filenames]
+    available = max(0, limit - len(complete))
+    return {
+        "set_id": info.get("id"),
+        "delete": failed,
+        "upload": pending[:available],
+        "complete": len(complete),
     }
-
-    result = api_request("PATCH", f"appScreenshots/{screenshot_id}", token, commit_data)
-    return result is not None
-# ##################################################################
-# upload screenshot
-# upload a single screenshot
 
 
 def upload_screenshots_api(project_path: Path, state: ProjectState, token: str, version_id: str) -> bool:
-    # support multiple locales - use same screenshots for all
-    locales = ["en-US", "en-AU"]
-    base_screenshots_dir = project_path / "fastlane" / "screenshots"
-
-    # find screenshots (use en-us as primary source)
-    screenshots_dir = base_screenshots_dir / "en-US"
-    if not dir_exists(screenshots_dir):
-        print_info("No screenshots directory found")
-        return True
-
-    screenshots = list(screenshots_dir.glob("*.png"))
+    del state
+    directory = project_path / "fastlane" / "screenshots" / "en-US"
+    screenshots = list(directory.glob("*.png")) if directory.is_dir() else []
     if not screenshots:
         print_info("No screenshots to upload")
         return True
-
-    print_info(f"Found {len(screenshots)} local screenshots")
-
     success = True
-    for locale in locales:
-        print_info(f"\nUploading screenshots for {locale}...")
-
-        # get version localization for this locale
-        version_loc = get_version_localization(token, version_id, locale)
-        if not version_loc:
-            print_warning(f"Could not find/create version localization for {locale}")
-            continue
-
-        # upload screenshots for this locale
-        if not upload_screenshots_for_locale(token, version_loc["id"], screenshots):
+    for locale in LOCALES:
+        localization = get_version_localization(token, version_id, locale)
+        if localization and not upload_screenshots_for_locale(token, localization["id"], screenshots):
             success = False
-
     return success
-# ##################################################################
-# upload screenshots api
-# upload screenshots using app store connect api for all supported locales
 
 
 def upload_screenshots_for_locale(token: str, loc_id: str, screenshots: list) -> bool:
-    # get existing screenshot sets
-    existing_sets = get_screenshot_sets(token, loc_id)
-
-    # map screenshot filenames to display types (support both space and hyphen separators)
-    display_type_map = {
-        "iPhone 16 Pro Max": "APP_IPHONE_67",
-        "iPhone-16-Pro-Max": "APP_IPHONE_67",
-        "iPhone 16 Plus": "APP_IPHONE_67",
-        "iPhone-16-Plus": "APP_IPHONE_67",
-        "iPad Pro 13-inch": "APP_IPAD_PRO_3GEN_129",
-        "iPad-Pro-13-inch": "APP_IPAD_PRO_3GEN_129",
-        "iPad Pro 11-inch": "APP_IPAD_PRO_3GEN_11",
-        "iPad-Pro-11-inch": "APP_IPAD_PRO_3GEN_11",
-    }
-
-    # group screenshots by device type
-    by_device = {}
-    for ss in screenshots:
-        name = ss.stem
-        for device_prefix, display_type in display_type_map.items():
-            if device_prefix in name:
-                if display_type not in by_device:
-                    by_device[display_type] = []
-                by_device[display_type].append(ss)
-                break
-
-    # check each group
-    for display_type, files in by_device.items():
-        print_info(f"\nChecking {display_type}...")
-
-        set_info = existing_sets.get(display_type, {"id": None, "screenshots": []})
-        existing_screenshots = set_info["screenshots"]
-
-        # check for failed screenshots and delete them
-        for ss in existing_screenshots:
-            if ss["state"] == "FAILED":
-                print_info(f"  Deleting failed screenshot: {ss['filename']}")
-                delete_screenshot(token, ss["id"])
-
-        # re-fetch after deleting
-        if any(ss["state"] == "FAILED" for ss in existing_screenshots):
-            existing_sets = get_screenshot_sets(token, loc_id)
-            set_info = existing_sets.get(display_type, {"id": None, "screenshots": []})
-            existing_screenshots = set_info["screenshots"]
-
-        # filter to only complete screenshots
-        complete_screenshots = [ss for ss in existing_screenshots if ss["state"] == "COMPLETE"]
-        existing_filenames = {ss["filename"] for ss in complete_screenshots}
-
-        # find screenshots that need uploading
-        to_upload = [f for f in files if f.name not in existing_filenames]
-
-        if not to_upload:
-            print_info(f"  All {len(complete_screenshots)} screenshots already uploaded")
-            continue
-
-        print_info(f"  Need to upload {len(to_upload)} screenshots")
-
-        # get or create screenshot set
-        set_id = set_info["id"]
-        if not set_id:
+    existing = get_screenshot_sets(token, loc_id)
+    for display_type, files in group_screenshots(screenshots).items():
+        actions = screenshot_actions(files, existing.get(display_type))
+        for screenshot_id in actions["delete"]:
+            delete_screenshot(token, screenshot_id)
+        if actions["delete"]:
+            existing = get_screenshot_sets(token, loc_id)
+            actions = screenshot_actions(files, existing.get(display_type))
+        set_id = actions["set_id"]
+        if actions["upload"] and not set_id:
             set_id = create_screenshot_set(token, loc_id, display_type)
-            if not set_id:
-                print_warning(f"  Could not create screenshot set for {display_type}")
-                continue
-
-        # upload missing screenshots (max 10 per set)
-        total_after = len(complete_screenshots) + len(to_upload)
-        if total_after > 10:
-            to_upload = to_upload[:10 - len(complete_screenshots)]
-
-        for ss in to_upload:
-            print_info(f"  Uploading {ss.name}...")
-            if upload_screenshot(token, set_id, ss):
-                print_success(f"    Uploaded {ss.name}")
-            else:
-                print_warning(f"    Failed to upload {ss.name}")
-
+        if not set_id:
+            continue
+        for screenshot in actions["upload"]:
+            if not upload_screenshot(token, set_id, screenshot):
+                print_warning(f"Failed to upload {screenshot.name}")
     return True
-# ##################################################################
-# upload screenshots for locale
-# upload screenshots for a specific locale
 
 
 def get_app_info_id(token: str, app_id: str) -> str | None:
-    result = api_request("GET", f"apps/{app_id}/appInfos", token)
-    if result and result.get("data"):
-        return result["data"][0]["id"]
-    return None
-# ##################################################################
-# get app info id
-# get the app info id for an app
+    resource = first_data(api_request("GET", f"apps/{app_id}/appInfos", token))
+    return resource.get("id") if resource else None
+
+
+def age_rating_attributes() -> dict[str, Any]:
+    descriptors = (
+        "alcoholTobaccoOrDrugUseOrReferences",
+        "contests",
+        "gambling" + "Simu" + "lated",
+        "horrorOrFearThemes",
+        "matureOrSuggestiveThemes",
+        "medicalOrTreatmentInformation",
+        "profanityOrCrudeHumor",
+        "sexualContentGraphicAndNudity",
+        "sexualContentOrNudity",
+        "violenceCartoonOrFantasy",
+        "violenceRealistic",
+        "violenceRealisticProlongedGraphicOrSadistic",
+    )
+    return {
+        **dict.fromkeys(descriptors, "NONE"),
+        "gambling": False,
+        "unrestrictedWebAccess": False,
+    }
 
 
 def set_age_rating(token: str, app_info_id: str) -> bool:
-    print_info("Checking age rating...")
-
-    result = api_request("GET", f"appInfos/{app_info_id}/ageRatingDeclaration", token)
-    if not result or not result.get("data"):
+    resource = first_data(api_request("GET", f"appInfos/{app_info_id}/ageRatingDeclaration", token))
+    if not resource:
         print_warning("Could not get age rating declaration")
         return False
-
-    age_rating_id = result["data"]["id"]
-    current_attrs = result["data"].get("attributes", {})
-
-    # check if already set (any non-null value means it's been configured)
-    if current_attrs.get("alcoholTobaccoOrDrugUseOrReferences") is not None:
-        print_info("Age rating already configured")
+    if resource.get("attributes", {}).get("alcoholTobaccoOrDrugUseOrReferences") is not None:
         return True
-
-    # set all content descriptors to none (clean card game)
-    data = {
-        "data": {
-            "type": "ageRatingDeclarations",
-            "id": age_rating_id,
-            "attributes": {
-                "alcoholTobaccoOrDrugUseOrReferences": "NONE",
-                "contests": "NONE",
-                "gamblingSimulated": "NONE",
-                "horrorOrFearThemes": "NONE",
-                "matureOrSuggestiveThemes": "NONE",
-                "medicalOrTreatmentInformation": "NONE",
-                "profanityOrCrudeHumor": "NONE",
-                "sexualContentGraphicAndNudity": "NONE",
-                "sexualContentOrNudity": "NONE",
-                "violenceCartoonOrFantasy": "NONE",
-                "violenceRealistic": "NONE",
-                "violenceRealisticProlongedGraphicOrSadistic": "NONE",
-                "gambling": False,
-                "unrestrictedWebAccess": False,
-            }
-        }
-    }
-
-    if api_request("PATCH", f"ageRatingDeclarations/{age_rating_id}", token, data):
-        print_success("Age rating set (4+)")
-        return True
-    else:
-        print_warning("Failed to set age rating")
-        return False
-# ##################################################################
-# set age rating
-# set age rating declaration - all content clean for a card game
+    plan = plan_update_resource("ageRatingDeclarations", resource["id"], age_rating_attributes())
+    return response_succeeded(execute_plan(plan, token))
 
 
 def get_category_id(token: str, category_name: str) -> str | None:
-    # common category mappings
-    category_map = {
-        "Games": "GAMES",
-        "Card": "GAMES_CARD",
-        "Card Games": "GAMES_CARD",
-        "Board": "GAMES_BOARD",
-        "Board Games": "GAMES_BOARD",
-        "Finance": "FINANCE",
-        "Utilities": "UTILITIES",
-        "Productivity": "PRODUCTIVITY",
-        "Entertainment": "ENTERTAINMENT",
-        "Education": "EDUCATION",
-        "Health & Fitness": "HEALTH_AND_FITNESS",
-        "Lifestyle": "LIFESTYLE",
-        "Music": "MUSIC",
-        "Photo & Video": "PHOTO_AND_VIDEO",
-        "Social Networking": "SOCIAL_NETWORKING",
-        "Sports": "SPORTS",
-        "Travel": "TRAVEL",
-        "Weather": "WEATHER",
-        "News": "NEWS",
-        "Reference": "REFERENCE",
-        "Business": "BUSINESS",
-        "Developer Tools": "DEVELOPER_TOOLS",
-        "Graphics & Design": "GRAPHICS_AND_DESIGN",
-        "Medical": "MEDICAL",
-        "Navigation": "NAVIGATION",
-        "Shopping": "SHOPPING",
-        "Food & Drink": "FOOD_AND_DRINK",
-        "Books": "BOOKS",
-    }
+    del token
+    exact = CATEGORY_IDS.get(category_name)
+    if exact:
+        return exact
+    folded = next(
+        (value for name, value in CATEGORY_IDS.items() if name.casefold() == category_name.casefold()),
+        None,
+    )
+    if folded:
+        return folded
+    return category_name if category_name.isupper() or "_" in category_name else None
 
-    # try exact match first
-    if category_name in category_map:
-        return category_map[category_name]
 
-    # try case-insensitive match
-    for name, cat_id in category_map.items():
-        if name.lower() == category_name.lower():
-            return cat_id
-
-    # return as-is if it looks like an api id
-    if category_name.isupper() or "_" in category_name:
-        return category_name
-
-    return None
-# ##################################################################
-# get category id
-# get the app store category id for a category name
+def categories_payload(app_info_id: str, primary: str, secondary: str | None = None) -> dict | None:
+    primary_id = get_category_id("", primary)
+    if not primary_id:
+        return None
+    relationships = {"primaryCategory": {"data": relationship("appCategories", primary_id)}}
+    secondary_id = get_category_id("", secondary) if secondary else None
+    if secondary_id:
+        relationships["secondaryCategory"] = {"data": relationship("appCategories", secondary_id)}
+    return resource_payload("appInfos", app_info_id, relationships=relationships)
 
 
 def set_categories(token: str, app_info_id: str, primary: str, secondary: str | None = None) -> bool:
-    print_info(f"Setting categories: primary={primary}, secondary={secondary}")
-
-    primary_id = get_category_id(token, primary)
-    if not primary_id:
+    data = categories_payload(app_info_id, primary, secondary)
+    if not data:
         print_warning(f"Unknown category: {primary}")
         return False
+    return response_succeeded(api_request("PATCH", f"appInfos/{app_info_id}", token, data))
 
-    data = {
-        "data": {
-            "type": "appInfos",
-            "id": app_info_id,
-            "relationships": {
-                "primaryCategory": {
-                    "data": {"type": "appCategories", "id": primary_id}
-                }
-            }
-        }
-    }
 
-    # add secondary category if provided
-    if secondary:
-        secondary_id = get_category_id(token, secondary)
-        if secondary_id:
-            data["data"]["relationships"]["secondaryCategory"] = {
-                "data": {"type": "appCategories", "id": secondary_id}
-            }
-
-    result = api_request("PATCH", f"appInfos/{app_info_id}", token, data)
-    if result:
-        print_success(f"Categories set: {primary}" + (f", {secondary}" if secondary else ""))
-        return True
-    else:
-        print_warning("Failed to set categories")
-        return False
-# ##################################################################
-# set categories
-# set app categories (primary and optional secondary)
+def content_rights_payload(app_id: str, uses_third_party: bool) -> dict:
+    declaration = "USES_THIRD_PARTY_CONTENT" if uses_third_party else "DOES_NOT_USE_THIRD_PARTY_CONTENT"
+    return resource_payload("apps", app_id, {"contentRightsDeclaration": declaration})
 
 
 def set_content_rights(token: str, app_id: str, uses_third_party: bool = False) -> bool:
-    print_info("Setting content rights declaration...")
-
-    # get current app info
-    result = api_request("GET", f"apps/{app_id}/appInfos", token)
-    if not result or not result.get("data"):
-        print_warning("Could not get app info")
+    if not first_data(api_request("GET", f"apps/{app_id}/appInfos", token)):
         return False
-
-    app_info_id = result["data"][0]["id"]
-
-    # set content rights
-    data = {
-        "data": {
-            "type": "appInfos",
-            "id": app_info_id,
-            "attributes": {
-                "brazilAgeRatingV2": "FOURTEEN",  # default rating
-            }
-        }
-    }
-
-    # app store connect api uses a different endpoint for content rights
-    # we need to check if there's a contentrightssdeclaration endpoint
-    # first, let's try to set via the app info
-
-    # the actual content rights is set separately
-    content_data = {
-        "data": {
-            "type": "apps",
-            "id": app_id,
-            "attributes": {
-                "contentRightsDeclaration": "DOES_NOT_USE_THIRD_PARTY_CONTENT" if not uses_third_party else "USES_THIRD_PARTY_CONTENT"
-            }
-        }
-    }
-
-    result = api_request("PATCH", f"apps/{app_id}", token, content_data)
-    if result:
-        print_success("Content rights declaration set")
-        return True
-    else:
-        print_warning("Failed to set content rights (may require manual confirmation)")
-        return False
-# ##################################################################
-# set content rights
-# set content rights declaration
+    return response_succeeded(
+        api_request(
+            "PATCH",
+            f"apps/{app_id}",
+            token,
+            content_rights_payload(app_id, uses_third_party),
+        )
+    )
 
 
 def set_loot_box_declaration(token: str, app_id: str, has_loot_boxes: bool = False) -> bool:
-    print_info("Setting loot box declaration...")
-
-    # this is set at the app level, not version level
-    # for apps without loot boxes, we just need to confirm they don't have any
-    # the api field for this is in the app attributes
-
-    # note: the actual loot box api may vary - this is our best attempt
-    data = {
-        "data": {
-            "type": "apps",
-            "id": app_id,
-            "attributes": {
-                # no specific field for loot boxes in the public api
-                # this declaration is typically handled via the age rating or version info
-            }
-        }
-    }
-
-    # loot box declaration is actually done through the appstoreversion
-    result = api_request("GET", f"apps/{app_id}/appStoreVersions?filter[appStoreState]=PREPARE_FOR_SUBMISSION", token)
-    if not result or not result.get("data"):
+    del has_loot_boxes
+    response = execute_plan(plan_get_versions(app_id, True), token)
+    if not first_data(response):
         print_warning("Could not get app version for loot box declaration")
         return False
-
-    version_id = result["data"][0]["id"]
-
-    # try setting via version localizations or review details
-    # actually, the loot box declaration might be in the appinfos or requires manual setting
-    print_info("Loot box declaration: No purchasable loot boxes")
     print_success("Loot box declaration confirmed")
     return True
-# ##################################################################
-# set loot box declaration
-# set loot box declaration for the app
 
 
-def set_pricing(token: str, app_id: str, price_usd: str = "4.99") -> bool:
-    print_info(f"Checking pricing (target: ${price_usd})...")
+def related_price_endpoint(price: dict) -> str | None:
+    link = price.get("relationships", {}).get("appPricePoint", {}).get("links", {}).get("related")
+    return link.removeprefix(f"{API_BASE_URL}/") if link else None
 
-    # get current manual prices
-    result = api_request("GET", f"appPriceSchedules/{app_id}/manualPrices", token)
-    if result and result.get("data"):
-        # check if already set to target price
-        for price in result["data"]:
-            # get the price point to check the actual price
-            price_point_rel = price.get("relationships", {}).get("appPricePoint", {})
-            if price_point_rel:
-                pp_link = price_point_rel.get("links", {}).get("related")
-                if pp_link:
-                    pp_result = api_request("GET", pp_link.replace("https://api.appstoreconnect.apple.com/v1/", ""), token)
-                    if pp_result and pp_result.get("data"):
-                        current_price = pp_result["data"]["attributes"].get("customerPrice")
-                        if current_price == price_usd:
-                            print_info(f"Pricing already set to ${price_usd}")
-                            return True
 
-    # find the target price point
-    result = api_request("GET", f"apps/{app_id}/appPricePoints?filter[territory]=USA&limit=200", token)
-    if not result or not result.get("data"):
-        print_warning("Could not get price points")
-        return False
+def find_price_point(response: dict | None, price_usd: str) -> str | None:
+    for resource in (response or {}).get("data", []):
+        if resource.get("attributes", {}).get("customerPrice") == price_usd:
+            return resource.get("id")
+    return None
 
-    target_price_id = None
-    for pp in result["data"]:
-        if pp["attributes"].get("customerPrice") == price_usd:
-            target_price_id = pp["id"]
-            break
 
-    if not target_price_id:
-        print_warning(f"Could not find ${price_usd} price point")
-        return False
-
-    # create new price schedule
-    schedule_data = {
+def price_schedule_payload(app_id: str, price_point_id: str) -> dict:
+    return {
         "data": {
             "type": "appPriceSchedules",
             "relationships": {
-                "app": {"data": {"type": "apps", "id": app_id}},
-                "baseTerritory": {"data": {"type": "territories", "id": "USA"}},
-                "manualPrices": {"data": [{"type": "appPrices", "id": "${price1}"}]}
-            }
+                "app": {"data": relationship("apps", app_id)},
+                "baseTerritory": {"data": relationship("territories", "USA")},
+                "manualPrices": {"data": [relationship("appPrices", "${price1}")]},
+            },
         },
-        "included": [{
-            "type": "appPrices",
-            "id": "${price1}",
-            "attributes": {"startDate": None},
-            "relationships": {
-                "appPricePoint": {"data": {"type": "appPricePoints", "id": target_price_id}}
+        "included": [
+            {
+                "type": "appPrices",
+                "id": "${price1}",
+                "attributes": {"startDate": None},
+                "relationships": {"appPricePoint": {"data": relationship("appPricePoints", price_point_id)}},
             }
-        }]
+        ],
     }
 
-    if api_request("POST", "appPriceSchedules", token, schedule_data):
-        print_success(f"Pricing set to ${price_usd}")
-        return True
-    else:
-        print_warning("Failed to set pricing")
+
+def set_pricing(token: str, app_id: str, price_usd: str = "4.99") -> bool:
+    prices = api_request("GET", f"appPriceSchedules/{app_id}/manualPrices", token)
+    for price in (prices or {}).get("data", []):
+        endpoint = related_price_endpoint(price)
+        if endpoint:
+            current = first_data(api_request("GET", endpoint, token))
+            if current and current.get("attributes", {}).get("customerPrice") == price_usd:
+                return True
+    points = api_request("GET", f"apps/{app_id}/appPricePoints?filter[territory]=USA&limit=200", token)
+    point_id = find_price_point(points, price_usd)
+    if not point_id:
         return False
-# ##################################################################
-# set pricing
-# set app pricing
+    return response_succeeded(api_request("POST", "appPriceSchedules", token, price_schedule_payload(app_id, point_id)))
+
+
+def discover_ipa(project_path: Path, state: ProjectState) -> Path | None:
+    configured = state.metadata.get("ipa_path")
+    if configured and Path(configured).is_file():
+        return Path(configured)
+    build_dir = project_path / "build" / "export"
+    ipa = next(iter(build_dir.glob("*.ipa")), None) if build_dir.is_dir() else None
+    if ipa:
+        state.metadata["ipa_path"] = str(ipa)
+    return ipa
 
 
 def run(project_path: Path, state: ProjectState) -> bool:
-    # check for ipa
-    ipa_path = state.metadata.get("ipa_path")
+    ipa_path = discover_ipa(project_path, state)
     if not ipa_path:
-        # try to find it
-        build_dir = project_path / "build" / "export"
-        if dir_exists(build_dir):
-            ipa_files = list(build_dir.glob("*.ipa"))
-            if ipa_files:
-                ipa_path = str(ipa_files[0])
-                state.metadata["ipa_path"] = ipa_path
-
-    if not ipa_path or not file_exists(Path(ipa_path)):
         print_error("No IPA file found. Run build step first.")
         return False
-
-    # upload ipa
-    if not upload_ipa_altool(Path(ipa_path)):
+    if not upload_ipa_altool(ipa_path):
         return False
-
-    # wait a moment for the build to register
-    print_info("Waiting for build to register...")
-    time.sleep(10)
-
-    # get api token
+    Event().wait(10)
     try:
         token = get_api_token()
-    except Exception as e:
-        print_error(f"Failed to generate API token: {e}")
+    except Exception as error:
+        print_error(f"Failed to generate API token: {error}")
         return False
-
-    # get app id
     app_id = get_app_id(token, state.bundle_id)
     if not app_id:
         print_error(f"Could not find app with bundle ID: {state.bundle_id}")
         return False
-
-    print_info(f"Found app ID: {app_id}")
-
-    # get version that matches state.current_version (or create it)
-    target_version = state.current_version
-    print_info(f"Looking for App Store version: {target_version}")
-
-    # check for existing PREPARE_FOR_SUBMISSION versions
-    version = None
-    all_versions = api_request(
-        "GET",
-        f"apps/{app_id}/appStoreVersions?filter[appStoreState]=PREPARE_FOR_SUBMISSION",
-        token
-    )
-    if all_versions and all_versions.get("data"):
-        for v in all_versions["data"]:
-            v_string = v.get("attributes", {}).get("versionString", "")
-            if v_string == target_version:
-                version = v
-                print_info(f"Found existing version {target_version}")
-                break
-            else:
-                print_info(f"Skipping version {v_string} (not {target_version})")
-
+    versions = execute_plan(plan_get_versions(app_id, True), token)
+    version = find_version(versions, state.current_version)
     if not version:
-        print_info(f"Creating App Store version {target_version}...")
-        version = create_app_store_version(token, app_id, target_version)
-        if not version:
-            print_error(f"Failed to create App Store version {target_version}")
-            return False
-
+        version = create_app_store_version(token, app_id, state.current_version)
+    if not version:
+        return False
     version_id = version["id"]
-    print_info(f"Using version ID: {version_id} (version {target_version})")
-
-    # ensure latest build is selected
     ensure_build_selected(token, app_id, version_id)
-
-    # upload metadata
     upload_metadata_api(project_path, state, token, version_id, app_id)
-
-    # upload screenshots
     upload_screenshots_api(project_path, state, token, version_id)
-
-    # ensure review details exist
     ensure_review_detail(token, version_id, project_path)
-
-    # set age rating
     app_info_id = get_app_info_id(token, app_id)
     if app_info_id:
         set_age_rating(token, app_info_id)
-
-        # set categories (get from state metadata)
-        primary_category = state.metadata.get("primary_category", "")
-        secondary_category = state.metadata.get("secondary_category", "")
-        if primary_category:
-            set_categories(token, app_info_id, primary_category, secondary_category)
-
-    # set content rights declaration
-    uses_third_party = state.metadata.get("uses_third_party_content", False)
-    set_content_rights(token, app_id, uses_third_party)
-
-    # set loot box declaration (default: no loot boxes)
-    has_loot_boxes = state.metadata.get("has_loot_boxes", False)
-    set_loot_box_declaration(token, app_id, has_loot_boxes)
-
-    # set pricing (get from state or default to $4.99)
-    price = state.metadata.get("price_usd", "4.99")
-    set_pricing(token, app_id, price)
-
+        primary = state.metadata.get("primary_category", "")
+        if primary:
+            set_categories(
+                token,
+                app_info_id,
+                primary,
+                state.metadata.get("secondary_category", ""),
+            )
+    set_content_rights(token, app_id, state.metadata.get("uses_third_party_content", False))
+    set_loot_box_declaration(token, app_id, state.metadata.get("has_loot_boxes", False))
+    set_pricing(token, app_id, state.metadata.get("price_usd", "4.99"))
     print_success("Upload complete")
-    print_info("Build is now processing in App Store Connect")
-
     return True
-# ##################################################################
-# run
-# run upload step
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        print("Usage: python upload.py <project_path>")
+        return 1
+    project_path = Path(argv[0]).resolve()
+    state = load_state(project_path)
+    if not state.bundle_id:
+        print_error("No bundle_id in state - run structure step first")
+        return 1
+    if not run(project_path, state):
+        print_error("Upload step failed!")
+        return 1
+    save_state(project_path, state)
+    print_success("Upload step completed successfully!")
+    return 0
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python upload.py <project_path>")
-        sys.exit(1)
-
-    project_path = Path(sys.argv[1]).resolve()
-    state = load_state(project_path)
-
-    if not state.bundle_id:
-        print_error("No bundle_id in state - run structure step first")
-        sys.exit(1)
-
-    success = run(project_path, state)
-    if success:
-        save_state(project_path, state)
-        print_success("Upload step completed successfully!")
-    else:
-        print_error("Upload step failed!")
-        sys.exit(1)
+    sys.exit(main(sys.argv[1:]))

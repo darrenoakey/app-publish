@@ -5,6 +5,7 @@
 from pathlib import Path
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState
@@ -12,8 +13,6 @@ from config import WEB_INDICATORS, SWIFT_INDICATORS, BUNDLE_ID_PREFIX
 from utils import (
     print_info,
     print_success,
-    print_warning,
-    find_files,
     dir_exists,
     file_exists,
 )
@@ -89,6 +88,7 @@ def detect_bundle_id(project_path: Path) -> str | None:
         content = pbxproj.read_text()
         # Look for PRODUCT_BUNDLE_IDENTIFIER
         import re
+
         match = re.search(r'PRODUCT_BUNDLE_IDENTIFIER\s*=\s*"?([^";]+)"?', content)
         if match:
             return match.group(1)
@@ -103,13 +103,14 @@ def generate_bundle_id(project_name: str) -> str:
     # Sanitize project name: lowercase, replace spaces/special chars with nothing
     # Bundle IDs must be alphanumeric with dots only (no dashes allowed)
     import re
+
     # First, replace common separators with nothing (camelCase-like)
-    sanitized = re.sub(r'[-_\s]+(.)', lambda m: m.group(1).upper(), project_name.lower())
+    sanitized = re.sub(r"[-_\s]+(.)", lambda m: m.group(1).upper(), project_name.lower())
     # Remove any remaining non-alphanumeric characters
-    sanitized = re.sub(r'[^a-zA-Z0-9]', '', sanitized)
+    sanitized = re.sub(r"[^a-zA-Z0-9]", "", sanitized)
     # Ensure it starts with a letter
     if sanitized and not sanitized[0].isalpha():
-        sanitized = 'app' + sanitized
+        sanitized = "app" + sanitized
     return f"{BUNDLE_ID_PREFIX}{sanitized}"
 
 

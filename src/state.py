@@ -111,6 +111,12 @@ def load_state(project_path: Path) -> ProjectState:
         try:
             data = json.loads(state_file.read_text())
             state = ProjectState(**data)
+            # Never trust a stored absolute path — it goes stale the moment
+            # the project moves (renamed dir, different machine, a worktree,
+            # a drive that no longer exists). The authoritative location is
+            # always where app-publish was just invoked.
+            state.project_path = str(project_path)
+            state.project_name = project_path.name
             return state
         except (json.JSONDecodeError, TypeError) as e:
             # corrupted state file, start fresh but warn

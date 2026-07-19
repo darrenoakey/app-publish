@@ -16,7 +16,11 @@ from utils import print_info, print_success, print_warning, print_error, write_f
 # ##################################################################
 # generate support html
 # generate static html support page for an app
-def generate_support_html(app_name: str, app_id: str, icon_path: Path = None) -> str:
+def generate_support_html(app_name: str, app_id: str, icon_path: Path = None, subtitle: str = "") -> str:
+    from datetime import datetime
+
+    current_year = datetime.now().year
+
     # convert app name to email-safe format (lowercase, underscores)
     email_name = app_name.lower().replace(" ", "_").replace("-", "_")
     support_email = f"{SUPPORT_EMAIL_PREFIX}{email_name}@{SUPPORT_EMAIL_DOMAIN}"
@@ -28,20 +32,20 @@ def generate_support_html(app_name: str, app_id: str, icon_path: Path = None) ->
     # app store link if we have an id
     app_store_link = ""
     if app_id:
-        app_store_link = f'''
+        app_store_link = f"""
         <a href="https://apps.apple.com/app/id{escape(app_id)}" class="app-store-badge">
             <img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83"
                  alt="Download on the App Store"
                  width="200">
-        </a>'''
+        </a>"""
 
-    # icon section - use app icon if available, otherwise a placeholder
+    # icon section - use app icon when available, otherwise a neutral glyph
     icon_section = f'''
         <div class="app-icon">
             <img src="icon.png" alt="{safe_name}" width="180" height="180">
         </div>'''
 
-    html = f'''<!DOCTYPE html>
+    html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -160,7 +164,7 @@ def generate_support_html(app_name: str, app_id: str, icon_path: Path = None) ->
         {icon_section}
 
         <h1>{safe_name}</h1>
-        <p class="tagline">iOS Application</p>
+        <p class="tagline">{escape(subtitle) if subtitle else "iOS Application"}</p>
 
         <div class="support-section">
             <h2>Need Help?</h2>
@@ -176,13 +180,15 @@ def generate_support_html(app_name: str, app_id: str, icon_path: Path = None) ->
         {app_store_link}
 
         <div class="footer">
-            <p>&copy; 2024 {escape(COMPANY_NAME)}. All rights reserved.</p>
+            <p>&copy; {current_year} {escape(COMPANY_NAME)}. All rights reserved.</p>
         </div>
     </div>
 </body>
-</html>'''
+</html>"""
 
     return html
+
+
 # ##################################################################
 # generate support html
 # generate static html support page for an app
@@ -192,7 +198,7 @@ def generate_support_html(app_name: str, app_id: str, icon_path: Path = None) ->
 # generate 404 html
 # generate a simple 404 page
 def generate_404_html() -> str:
-    return '''<!DOCTYPE html>
+    return """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -227,7 +233,9 @@ def generate_404_html() -> str:
         <p><a href="/">Return Home</a></p>
     </div>
 </body>
-</html>'''
+</html>"""
+
+
 # ##################################################################
 # generate 404 html
 # generate a simple 404 page
@@ -237,25 +245,27 @@ def generate_404_html() -> str:
 # list apps from s3
 # list all app directories from s3 bucket
 # returns list of dicts with slug and display name
-def list_apps_from_s3() -> list[dict[str, str]]:
+def list_apps_from_s3(aws_binary: str = "aws") -> list[dict[str, str]]:
     apps = []
     try:
         # list all prefixes (directories) in the bucket
-        cmd = ["aws", "s3", "ls", f"s3://{SUPPORT_S3_BUCKET}/"]
+        cmd = [aws_binary, "s3", "ls", f"s3://{SUPPORT_S3_BUCKET}/"]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
-            for line in result.stdout.strip().split('\n'):
-                if line.strip() and 'PRE ' in line:
+            for line in result.stdout.strip().split("\n"):
+                if line.strip() and "PRE " in line:
                     # parse "PRE app-name/" format
-                    slug = line.split('PRE ')[-1].strip().rstrip('/')
-                    # skip system files and non-app directories
-                    if slug and not slug.startswith('.') and slug not in ('404', 'index'):
+                    slug = line.split("PRE ")[-1].strip().rstrip("/")
+                    # omit system files and non-app directories
+                    if slug and not slug.startswith(".") and slug not in ("404", "index"):
                         # convert slug to display name (capitalize words)
-                        display_name = ' '.join(word.capitalize() for word in slug.split('-'))
-                        apps.append({'slug': slug, 'name': display_name})
+                        display_name = " ".join(word.capitalize() for word in slug.split("-"))
+                        apps.append({"slug": slug, "name": display_name})
     except Exception as e:
         print_warning(f"Could not list apps from S3: {e}")
-    return sorted(apps, key=lambda x: x['name'])
+    return sorted(apps, key=lambda x: x["name"])
+
+
 # ##################################################################
 # list apps from s3
 # list all app directories from s3 bucket
@@ -266,6 +276,7 @@ def list_apps_from_s3() -> list[dict[str, str]]:
 # generate the root index page listing all apps
 def generate_index_html(apps: list[dict[str, str]] = None) -> str:
     from datetime import datetime
+
     current_year = datetime.now().year
 
     if apps is None:
@@ -273,19 +284,22 @@ def generate_index_html(apps: list[dict[str, str]] = None) -> str:
 
     # generate app cards html
     if apps:
-        app_cards = '\n'.join(f'''
-            <a href="/{app['slug']}/" class="app-card">
-                <img src="/{app['slug']}/icon.png"
-                     alt="{escape(app['name'])}"
+        app_cards = "\n".join(
+            f'''
+            <a href="/{app["slug"]}/" class="app-card">
+                <img src="/{app["slug"]}/icon.png"
+                     alt="{escape(app["name"])}"
                      class="app-icon"
                      onerror="this.style.display='none'">
-                <span class="app-name">{escape(app['name'])}</span>
-            </a>''' for app in apps)
+                <span class="app-name">{escape(app["name"])}</span>
+            </a>'''
+            for app in apps
+        )
         apps_section = f'<div class="apps-grid">{app_cards}</div>'
     else:
         apps_section = '<p class="no-apps">No apps published yet.</p>'
 
-    return f'''<!DOCTYPE html>
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -408,7 +422,9 @@ def generate_index_html(apps: list[dict[str, str]] = None) -> str:
         </div>
     </div>
 </body>
-</html>'''
+</html>"""
+
+
 # ##################################################################
 # generate index html
 # generate the root index page listing all apps
@@ -417,19 +433,31 @@ def generate_index_html(apps: list[dict[str, str]] = None) -> str:
 # ##################################################################
 # upload to s3
 # upload a file to s3
-def upload_to_s3(local_path: Path, s3_key: str, content_type: str = "text/html") -> bool:
+def upload_to_s3(
+    local_path: Path,
+    s3_key: str,
+    content_type: str = "text/html",
+    aws_binary: str = "aws",
+) -> bool:
     try:
         cmd = [
-            "aws", "s3", "cp", str(local_path),
+            aws_binary,
+            "s3",
+            "cp",
+            str(local_path),
             f"s3://{SUPPORT_S3_BUCKET}/{s3_key}",
-            "--content-type", content_type,
-            "--cache-control", "max-age=3600"
+            "--content-type",
+            content_type,
+            "--cache-control",
+            "max-age=3600",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         return result.returncode == 0
     except Exception as e:
         print_error(f"S3 upload failed: {e}")
         return False
+
+
 # ##################################################################
 # upload to s3
 # upload a file to s3
@@ -438,19 +466,27 @@ def upload_to_s3(local_path: Path, s3_key: str, content_type: str = "text/html")
 # ##################################################################
 # upload string to s3
 # upload a string directly to s3
-def upload_string_to_s3(content: str, s3_key: str, content_type: str = "text/html") -> bool:
+def upload_string_to_s3(
+    content: str,
+    s3_key: str,
+    content_type: str = "text/html",
+    aws_binary: str = "aws",
+) -> bool:
     import tempfile
+
     try:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False) as f:
             f.write(content)
             temp_path = Path(f.name)
 
-        success = upload_to_s3(temp_path, s3_key, content_type)
+        success = upload_to_s3(temp_path, s3_key, content_type, aws_binary)
         temp_path.unlink()
         return success
     except Exception as e:
         print_error(f"S3 upload failed: {e}")
         return False
+
+
 # ##################################################################
 # upload string to s3
 # upload a string directly to s3
@@ -461,6 +497,7 @@ def upload_string_to_s3(content: str, s3_key: str, content_type: str = "text/htm
 # generate a privacy policy html page for an app
 def generate_privacy_policy_html(app_name: str, app_description: str = "") -> str:
     from datetime import datetime
+
     safe_name = escape(app_name)
     current_date = datetime.now().strftime("%B %d, %Y")
 
@@ -513,7 +550,7 @@ def generate_privacy_policy_html(app_name: str, app_description: str = "") -> st
         </section>
     """
 
-    html = f'''<!DOCTYPE html>
+    html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -598,9 +635,11 @@ def generate_privacy_policy_html(app_name: str, app_description: str = "") -> st
         </div>
     </div>
 </body>
-</html>'''
+</html>"""
 
     return html
+
+
 # ##################################################################
 # generate privacy policy html
 # generate a privacy policy html page for an app
@@ -609,21 +648,27 @@ def generate_privacy_policy_html(app_name: str, app_description: str = "") -> st
 # ##################################################################
 # invalidate cloudfront
 # invalidate cloudfront cache for updated paths
-def invalidate_cloudfront(paths: list[str] = None) -> bool:
+def invalidate_cloudfront(paths: list[str] = None, aws_binary: str = "aws") -> bool:
     if paths is None:
         paths = ["/*"]
 
     try:
         cmd = [
-            "aws", "cloudfront", "create-invalidation",
-            "--distribution-id", SUPPORT_CLOUDFRONT_ID,
-            "--paths", *paths
+            aws_binary,
+            "cloudfront",
+            "create-invalidation",
+            "--distribution-id",
+            SUPPORT_CLOUDFRONT_ID,
+            "--paths",
+            *paths,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         return result.returncode == 0
     except Exception as e:
         print_warning(f"CloudFront invalidation failed: {e}")
         return False
+
+
 # ##################################################################
 # invalidate cloudfront
 # invalidate cloudfront cache for updated paths
@@ -640,7 +685,7 @@ def run(project_path: Path, state) -> bool:
     app_id = state.app_store_id
 
     if not app_name:
-        print_warning("No app name set, skipping support page")
+        print_warning("No app name set; support page not generated")
         return True
 
     # create url-safe slug from app name
@@ -653,7 +698,8 @@ def run(project_path: Path, state) -> bool:
     print_info(f"Support URL: {SUPPORT_DOMAIN}/{slug}/")
 
     # generate and upload support page
-    html = generate_support_html(app_name, app_id)
+    subtitle = state.app_subtitle if hasattr(state, "app_subtitle") else ""
+    html = generate_support_html(app_name, app_id, subtitle=subtitle)
 
     if not upload_string_to_s3(html, f"{slug}/index.html"):
         print_error("Failed to upload support page")
@@ -662,7 +708,7 @@ def run(project_path: Path, state) -> bool:
 
     # generate and upload privacy policy
     print_info("Generating privacy policy...")
-    app_description = state.app_description if hasattr(state, 'app_description') else ""
+    app_description = state.app_description if hasattr(state, "app_description") else ""
     privacy_html = generate_privacy_policy_html(app_name, app_description)
 
     if not upload_string_to_s3(privacy_html, f"{slug}/privacy.html"):
@@ -670,20 +716,42 @@ def run(project_path: Path, state) -> bool:
     else:
         print_success(f"Uploaded {slug}/privacy.html")
 
-    # upload app icon if available
-    icon_path = project_path / "ios" / "App" / "App" / "Assets.xcassets" / "AppIcon.appiconset" / "ios-marketing-1024x1024@1x.png"
-    if not icon_path.exists():
-        # try alternative location
-        icon_path = project_path / "AppIcon.png"
+    # upload app icon if available - try multiple known locations
+    icon_candidates = [
+        project_path / "ios" / "App" / "App" / "Assets.xcassets" / "AppIcon.appiconset" / "AppIcon-512@2x.png",
+        project_path
+        / "ios"
+        / "App"
+        / "App"
+        / "Assets.xcassets"
+        / "AppIcon.appiconset"
+        / "ios-marketing-1024x1024@1x.png",
+        project_path / "assets" / "icon-1024.png",
+        project_path / "AppIcon.png",
+    ]
+    icon_path = None
+    for candidate in icon_candidates:
+        if candidate.exists():
+            icon_path = candidate
+            break
 
-    if icon_path.exists():
+    if icon_path and icon_path.exists():
         # resize to 180x180 for web display
         import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             temp_icon = Path(f.name)
 
         try:
-            resize_cmd = ["sips", "-z", "180", "180", str(icon_path), "--out", str(temp_icon)]
+            resize_cmd = [
+                "sips",
+                "-z",
+                "180",
+                "180",
+                str(icon_path),
+                "--out",
+                str(temp_icon),
+            ]
             subprocess.run(resize_cmd, capture_output=True)
 
             if upload_to_s3(temp_icon, f"{slug}/icon.png", "image/png"):
@@ -710,21 +778,23 @@ def run(project_path: Path, state) -> bool:
     if metadata_dir.exists():
         write_file(metadata_dir / "support_url.txt", support_url)
         write_file(metadata_dir / "privacy_url.txt", privacy_url)
-        print_info(f"Updated metadata/en-US/support_url.txt")
-        print_info(f"Updated metadata/en-US/privacy_url.txt")
+        print_info("Updated metadata/en-US/support_url.txt")
+        print_info("Updated metadata/en-US/privacy_url.txt")
 
         # also update en-au if it exists
         en_au_dir = project_path / "fastlane" / "metadata" / "en-AU"
         if en_au_dir.exists():
             write_file(en_au_dir / "support_url.txt", support_url)
             write_file(en_au_dir / "privacy_url.txt", privacy_url)
-            print_info(f"Updated metadata/en-AU/support_url.txt")
-            print_info(f"Updated metadata/en-AU/privacy_url.txt")
+            print_info("Updated metadata/en-AU/support_url.txt")
+            print_info("Updated metadata/en-AU/privacy_url.txt")
 
     print_success(f"Support page ready: {support_url}")
     print_success(f"Privacy policy ready: {privacy_url}")
 
     return True
+
+
 # ##################################################################
 # run
 # create/update support page for the app

@@ -79,7 +79,7 @@ ICON_SIZES_IOS = [
 # screenshot device sizes (required by app store)
 SCREENSHOT_DEVICES = [
     "iPhone 16 Pro Max",  # 6.7" - 1290x2796
-    "iPhone 16 Plus",     # 6.5" - 1284x2778 (alternative 6.5")
+    "iPhone 16 Plus",  # 6.5" - 1284x2778 (alternative 6.5")
     "iPad Pro 13-inch (M4)",  # 12.9" - 2048x2732
     "iPad Pro 11-inch (M4)",  # 11" - 1668x2388
 ]
@@ -95,11 +95,11 @@ PIPELINE_STEPS = [
     "build",
     "screenshots",
     "metadata",
-    "support",      # create/update support page
+    "support",  # create/update support page
     "appstore_create",
     "upload",
     "submit",
-    "deploy",       # deploy to Starbuck (best-effort final step)
+    "deploy",  # deploy to Starbuck (best-effort final step)
 ]
 
 # steps that are best-effort: failure logs a warning but does not halt the pipeline

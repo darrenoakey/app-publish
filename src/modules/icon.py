@@ -1,12 +1,12 @@
 # ##################################################################
 # icon module
 # ai-generated app icon with all required sizes
-# uses claude for icon prompts, generate_flux for master icon, and pil to resize to all ios sizes
+# uses a deterministic prompt, the durable codex image queue, and pil to resize to all ios sizes
 import json
-import subprocess
 from pathlib import Path
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState
@@ -14,75 +14,94 @@ from config import ICON_SIZE, ICON_SIZES_IOS
 from utils import (
     print_info,
     print_success,
-    print_warning,
     print_error,
+    print_warning,
     run as exec_cmd,
-    llm_chat,
     ensure_dir,
     file_exists,
     write_file,
 )
 
+GENERATE_IMAGE_CLI = "/Users/darrenoakey/bin/generate_image"
+ICON_OPERATION_STATE = "icon-1024.image-job.json"
+
 
 def generate_icon_prompt(state: ProjectState) -> str:
     # ##################################################################
     # generate icon prompt
-    # use ai to create an icon generation prompt
-    prompt = f"""Create an image generation prompt for an iOS app icon.
+    # keep the durable request byte-identical across crashes and restarts
+    description = state.app_description[:500] if state.app_description else state.project_name
+    category = state.metadata.get("primary_category", "Utility")
+    return (
+        f"Professional iOS app icon for {state.app_name}, a {category} app described as: {description}. "
+        "Create a simple centered symbol with strong clean lines, crisp edges, minimal detail, and bold vibrant "
+        "saturated colors; recognizable from 29x29 through 1024x1024, suitable on light and dark backgrounds, "
+        "with no text, letters, numbers, fine details, watermarks, or borders."
+    )
 
-App name: {state.app_name}
-Description: {state.app_description[:500] if state.app_description else state.project_name}
-Category: {state.metadata.get('primary_category', 'Utility')}
 
-Generate a prompt for a professional iOS app icon that:
-- Is simple and recognizable at small sizes (29x29 to 1024x1024)
-- Has strong, clean lines and crisp edges that scale well when resized
-- Uses bold, vibrant, saturated colors
-- Has a clean, modern design with minimal detail
-- Works well on both light and dark backgrounds
-- Does NOT include any text or fine details that blur at small sizes
-- Has a simple centered symbol or graphic
-- Matches the app's theme (cheerful for games, professional for utilities, etc.)
+def is_valid_master_icon(path: Path) -> bool:
+    # ##################################################################
+    # validate master icon
+    # accept only a fully decoded png with the exact app store dimensions
+    if not path.is_file():
+        return False
 
-Respond with ONLY the image generation prompt (1-2 sentences), no other text.
-"""
-    return llm_chat(prompt)
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            image.verify()
+        with Image.open(path) as image:
+            image.load()
+            return image.format == "PNG" and image.size == (ICON_SIZE, ICON_SIZE)
+    except (OSError, SyntaxError, ValueError):
+        return False
 
 
 def generate_master_icon(project_path: Path, state: ProjectState) -> Path | None:
     # ##################################################################
     # generate master icon
-    # generate the master 1024x1024 icon using generate_flux
+    # generate the master icon through the one durable codex image path
     assets_dir = project_path / "assets"
     ensure_dir(assets_dir)
 
-    master_icon = assets_dir / "icon-1024.jpg"
+    master_icon = assets_dir / "icon-1024.png"
+    operation_state = assets_dir / ICON_OPERATION_STATE
 
-    if file_exists(master_icon):
-        print_info("Master icon already exists")
+    if is_valid_master_icon(master_icon):
+        print_info("Valid 1024x1024 PNG master icon already exists")
         return master_icon
+    if file_exists(master_icon):
+        print_warning(f"Existing master icon is invalid and will be recovered in place: {master_icon}")
 
-    # Generate icon prompt
-    print_info("Generating icon concept...")
     icon_prompt = generate_icon_prompt(state)
-    if not icon_prompt:
-        icon_prompt = f"Professional iOS app icon for {state.app_name}, simple modern design, bold colors, no text"
-
     print_info(f"Icon prompt: {icon_prompt[:80]}...")
 
-    # Use generate_flux to create the icon (25 steps for crisp, detailed output)
-    print_info("Generating icon image (this takes ~14 minutes)...")
-    ret_code, output = exec_cmd([
-        "generate_flux",
-        "--output", str(master_icon),
-        "--width", str(ICON_SIZE),
-        "--height", str(ICON_SIZE),
-        "--steps", "25",
-        "--prompt", icon_prompt,
-    ], timeout=1200)
+    print_info("Generating icon image through the durable Mac-mini Codex queue...")
+    ret_code, output = exec_cmd(
+        [
+            GENERATE_IMAGE_CLI,
+            "--output",
+            str(master_icon),
+            "--width",
+            str(ICON_SIZE),
+            "--height",
+            str(ICON_SIZE),
+            "--state-file",
+            str(operation_state),
+            "--timeout",
+            "inf",
+            "--prompt",
+            icon_prompt,
+        ]
+    )
 
-    if ret_code != 0 or not file_exists(master_icon):
+    if ret_code != 0:
         print_error(f"Failed to generate icon: {output}")
+        return None
+    if not is_valid_master_icon(master_icon):
+        print_error(f"Image service did not persist a valid {ICON_SIZE}x{ICON_SIZE} PNG at {master_icon}: {output}")
         return None
 
     print_success(f"Master icon generated: {master_icon}")
@@ -118,8 +137,8 @@ def resize_icons(master_icon: Path, project_path: Path, state: ProjectState) -> 
 
     # Load master icon
     img = Image.open(master_icon)
-    if img.mode != 'RGBA':
-        img = img.convert('RGBA')
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
 
     # Generate all sizes
     contents = {"images": [], "info": {"author": "app-publish", "version": 1}}
@@ -133,12 +152,14 @@ def resize_icons(master_icon: Path, project_path: Path, state: ProjectState) -> 
         resized.save(icons_dir / filename, "PNG")
 
         # Add to Contents.json
-        contents["images"].append({
-            "filename": filename,
-            "idiom": idiom,
-            "scale": f"{scale}x",
-            "size": f"{size}x{size}",
-        })
+        contents["images"].append(
+            {
+                "filename": filename,
+                "idiom": idiom,
+                "scale": f"{scale}x",
+                "size": f"{size}x{size}",
+            }
+        )
 
     # Write Contents.json
     write_file(icons_dir / "Contents.json", json.dumps(contents, indent=2))
@@ -162,7 +183,12 @@ def check_existing_icons(project_path: Path, state: ProjectState) -> bool:
         appiconset = assets_path / "AppIcon.appiconset"
         if appiconset.exists():
             # Check for 1024x1024 icon (the master icon required for App Store)
-            icon_1024_patterns = ["Icon-1024.png", "icon-1024.png", "icon-ios-marketing-1024x1024@1x.png", "AppIcon-1024.png"]
+            icon_1024_patterns = [
+                "Icon-1024.png",
+                "icon-1024.png",
+                "icon-ios-marketing-1024x1024@1x.png",
+                "AppIcon-1024.png",
+            ]
             for pattern in icon_1024_patterns:
                 if (appiconset / pattern).exists():
                     print_info(f"Found existing 1024x1024 icon: {appiconset / pattern}")
@@ -172,6 +198,7 @@ def check_existing_icons(project_path: Path, state: ProjectState) -> bool:
             for png_file in appiconset.glob("*.png"):
                 try:
                     from PIL import Image
+
                     with Image.open(png_file) as img:
                         if img.width >= 1024 and img.height >= 1024:
                             print_info(f"Found existing large icon: {png_file}")
@@ -186,7 +213,7 @@ def run(project_path: Path, state: ProjectState) -> bool:
     # ##################################################################
     # run icon generation step
     # creates assets/icon-1024.png (master icon) and all sized icons in xcode project
-    # skips if valid icons already exist in xcode project
+    # returns immediately when valid icons already exist in the Xcode project
     # Check for existing icons first
     if check_existing_icons(project_path, state):
         print_success("App icons already exist in Xcode project")

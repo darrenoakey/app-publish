@@ -1,9 +1,8 @@
-import json
-import time
-import subprocess
+from threading import Event
 from pathlib import Path
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import (
@@ -44,7 +43,7 @@ def boot_simulator(device_name: str) -> bool:
     if ret_code != 0:
         # Already booted is OK
         pass
-    time.sleep(2)
+    Event().wait(2)
     return True
 
 
@@ -52,9 +51,7 @@ def boot_simulator(device_name: str) -> bool:
 # install app
 # install app on simulator
 def install_app(device_name: str, app_path: Path) -> bool:
-    ret_code, output = exec_cmd([
-        "xcrun", "simctl", "install", device_name, str(app_path)
-    ])
+    ret_code, output = exec_cmd(["xcrun", "simctl", "install", device_name, str(app_path)])
     return ret_code == 0
 
 
@@ -62,9 +59,7 @@ def install_app(device_name: str, app_path: Path) -> bool:
 # launch app
 # launch app on simulator
 def launch_app(device_name: str, bundle_id: str) -> bool:
-    ret_code, output = exec_cmd([
-        "xcrun", "simctl", "launch", device_name, bundle_id
-    ])
+    ret_code, output = exec_cmd(["xcrun", "simctl", "launch", device_name, bundle_id])
     return ret_code == 0
 
 
@@ -72,9 +67,7 @@ def launch_app(device_name: str, bundle_id: str) -> bool:
 # capture screenshot
 # capture screenshot from simulator
 def capture_screenshot(device_name: str, output_path: Path) -> bool:
-    ret_code, output = exec_cmd([
-        "xcrun", "simctl", "io", device_name, "screenshot", str(output_path)
-    ])
+    ret_code, output = exec_cmd(["xcrun", "simctl", "io", device_name, "screenshot", str(output_path)])
     return ret_code == 0
 
 
@@ -92,9 +85,9 @@ def inject_javascript(device_name: str, bundle_id: str, js_code: str) -> bool:
 
 # ##################################################################
 # click simulator
-# simulate click in simulator using applescript to click in the simulator window
+# click in the simulator using applescript
 def click_simulator(device_name: str, x: int, y: int) -> bool:
-    script = f'''
+    script = f"""
     tell application "Simulator"
         activate
     end tell
@@ -106,7 +99,7 @@ def click_simulator(device_name: str, x: int, y: int) -> bool:
             click at {{{x}, {y}}}
         end tell
     end tell
-    '''
+    """
     ret_code, output = exec_cmd(["osascript", "-e", script])
     return ret_code == 0
 
@@ -130,7 +123,7 @@ def capture_scenario(device: dict, scenario: dict, screenshot_dir: Path, bundle_
 
     # Wait for app to load (first scenario) or navigate (subsequent scenarios)
     wait_time = scenario.get("wait", 3)
-    time.sleep(wait_time)
+    Event().wait(wait_time)
 
     # Capture
     output_path = screenshot_dir / f"{scenario_name}_{suffix}.png"
@@ -145,7 +138,13 @@ def capture_scenario(device: dict, scenario: dict, screenshot_dir: Path, bundle_
 # ##################################################################
 # capture all scenarios on device
 # capture all scenarios on a single device
-def capture_all_scenarios_on_device(device: dict, scenarios: list[dict], screenshot_dir: Path, bundle_id: str, app_path: Path) -> int:
+def capture_all_scenarios_on_device(
+    device: dict,
+    scenarios: list[dict],
+    screenshot_dir: Path,
+    bundle_id: str,
+    app_path: Path,
+) -> int:
     captured = 0
     for scenario in scenarios:
         if capture_scenario(device, scenario, screenshot_dir, bundle_id, app_path):
@@ -198,7 +197,7 @@ def run(project_path: Path, bundle_id: str, app_path: Path = None) -> bool:
 
     # Open Simulator app
     exec_cmd(["open", "-a", "Simulator"])
-    time.sleep(1)
+    Event().wait(1)
 
     # Capture on all devices for all scenarios
     captured = capture_all_devices(project_path, bundle_id, app_path, scenarios)

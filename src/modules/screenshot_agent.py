@@ -1,10 +1,9 @@
 import json
-import time
-import subprocess
+from threading import Event
 from pathlib import Path
-import re
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import (
@@ -15,7 +14,6 @@ from utils import (
     run as exec_cmd,
     ensure_dir,
     llm_json,
-    llm_chat,
 )
 
 # Required App Store screenshot devices
@@ -28,13 +26,9 @@ SCREENSHOT_DEVICES = [
 
 
 # ##################################################################
-# analyze app structure
-# use llm to analyze the app's source code and identify available screens/phases,
-# navigation patterns, key ui elements, and screenshot opportunities
-def analyze_app_structure(project_path: Path) -> dict[str, any]:
-    print_info("Analyzing app structure...")
-
-    # Find relevant source files
+# read source snippets
+# collect bounded app source text for analysis without crossing dependency directories
+def read_source_snippets(project_path: Path, max_size: int = 50000) -> list[str]:
     source_files = []
     for pattern in ["*.js", "*.ts", "*.jsx", "*.tsx", "*.html"]:
         for f in project_path.glob(pattern):
@@ -44,15 +38,11 @@ def analyze_app_structure(project_path: Path) -> dict[str, any]:
     # Read key files (limit to manageable size)
     code_snippets = []
     total_size = 0
-    max_size = 50000  # 50KB limit for analysis
 
     priority_files = ["ui.js", "app.js", "index.js", "main.js", "index.html"]
 
     # Sort files with priority ones first
-    source_files.sort(key=lambda f: (
-        0 if f.name in priority_files else 1,
-        f.stat().st_size
-    ))
+    source_files.sort(key=lambda f: (0 if f.name in priority_files else 1, f.stat().st_size))
 
     for f in source_files:
         if total_size > max_size:
@@ -62,8 +52,18 @@ def analyze_app_structure(project_path: Path) -> dict[str, any]:
             if len(content) + total_size < max_size:
                 code_snippets.append(f"=== {f.name} ===\n{content[:10000]}")
                 total_size += len(content)
-        except:
+        except (OSError, UnicodeError):
             pass
+    return code_snippets
+
+
+# ##################################################################
+# analyze app structure
+# use llm to analyze the app's source code and identify available screens/phases,
+# navigation patterns, key ui elements, and screenshot opportunities
+def analyze_app_structure(project_path: Path) -> dict[str, any]:
+    print_info("Analyzing app structure...")
+    code_snippets = read_source_snippets(project_path)
 
     if not code_snippets:
         print_warning("No analyzable source files found")
@@ -104,15 +104,23 @@ Respond with JSON in this format:
     result = llm_json(analysis_prompt)
 
     if result:
-        print_success(f"Found {len(result.get('screens', []))} screens, {len(result.get('screenshot_scenarios', []))} scenarios")
+        print_success(
+            f"Found {len(result.get('screens', []))} screens, {len(result.get('screenshot_scenarios', []))} scenarios"
+        )
         return result
     else:
         print_warning("LLM analysis failed, using default scenarios")
         return {
             "screens": [{"name": "main", "description": "Main screen", "trigger": "app launch"}],
             "screenshot_scenarios": [
-                {"name": "main", "description": "Main app screen", "screen": "main", "setup_steps": [], "priority": 1}
-            ]
+                {
+                    "name": "main",
+                    "description": "Main app screen",
+                    "screen": "main",
+                    "setup_steps": [],
+                    "priority": 1,
+                }
+            ],
         }
 
 
@@ -232,15 +240,23 @@ def build_simulator_app(project_path: Path) -> Path:
     # Build command
     build_dir = Path("/tmp/screenshot-build")
 
-    ret_code, output = exec_cmd([
-        "xcodebuild",
-        "-project", str(project_path / "ios" / "App" / "App.xcodeproj"),
-        "-scheme", "App",
-        "-sdk", "iphonesimulator",
-        "-configuration", "Debug",
-        "-derivedDataPath", str(build_dir),
-        "build"
-    ], timeout=300)
+    ret_code, output = exec_cmd(
+        [
+            "xcodebuild",
+            "-project",
+            str(project_path / "ios" / "App" / "App.xcodeproj"),
+            "-scheme",
+            "App",
+            "-sdk",
+            "iphonesimulator",
+            "-configuration",
+            "Debug",
+            "-derivedDataPath",
+            str(build_dir),
+            "build",
+        ],
+        timeout=300,
+    )
 
     if ret_code != 0:
         print_error(f"Build failed: {output[-500:]}")
@@ -263,7 +279,7 @@ def capture_device_screenshots(
     bundle_id: str,
     app_path: Path,
     scenarios: list[dict],
-    output_dir: Path
+    output_dir: Path,
 ) -> int:
     device_name = device["name"]
     suffix = device["suffix"]
@@ -273,14 +289,14 @@ def capture_device_screenshots(
 
     # Boot simulator
     exec_cmd(["xcrun", "simctl", "boot", device_name])
-    time.sleep(3)
+    Event().wait(3)
 
     # Install app
     exec_cmd(["xcrun", "simctl", "install", device_name, str(app_path)])
 
     # Launch app
     exec_cmd(["xcrun", "simctl", "launch", device_name, bundle_id])
-    time.sleep(4)  # Wait for app to load
+    Event().wait(4)  # Wait for app to load
 
     # Capture screenshots for each priority-1 scenario
     for scenario in sorted(scenarios, key=lambda s: s.get("priority", 5)):
@@ -292,9 +308,7 @@ def capture_device_screenshots(
 
         # For now, capture current state
         # Full automation would inject JS and control navigation
-        ret_code, _ = exec_cmd([
-            "xcrun", "simctl", "io", device_name, "screenshot", str(output_path)
-        ])
+        ret_code, _ = exec_cmd(["xcrun", "simctl", "io", device_name, "screenshot", str(output_path)])
 
         if ret_code == 0:
             print_success(f"  Captured: {output_path.name}")
@@ -302,7 +316,7 @@ def capture_device_screenshots(
         else:
             print_warning(f"  Failed: {output_path.name}")
 
-        time.sleep(1)
+        Event().wait(1)
 
     return captured
 
@@ -325,7 +339,7 @@ def run(project_path: Path, bundle_id: str) -> bool:
         scenarios = [{"name": "main", "description": "Main screen", "priority": 1}]
 
     # Step 2: Generate automation script
-    script_path = generate_automation_script(analysis, project_path)
+    generate_automation_script(analysis, project_path)
 
     # Step 3: Sync changes to iOS (for Capacitor apps)
     exec_cmd(["npx", "cap", "sync", "ios"], cwd=project_path)
@@ -338,9 +352,7 @@ def run(project_path: Path, bundle_id: str) -> bool:
     # Step 5: Capture on all devices
     total_captured = 0
     for device in SCREENSHOT_DEVICES:
-        count = capture_device_screenshots(
-            device, bundle_id, app_path, scenarios, output_dir
-        )
+        count = capture_device_screenshots(device, bundle_id, app_path, scenarios, output_dir)
         total_captured += count
 
     # Summary

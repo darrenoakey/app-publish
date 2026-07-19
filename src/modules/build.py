@@ -1,7 +1,7 @@
 from pathlib import Path
-from datetime import datetime
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState, load_state, save_state
@@ -16,6 +16,8 @@ from utils import (
     file_exists,
     dir_exists,
     write_file,
+    parse_schemes,
+    pick_scheme,
 )
 
 
@@ -32,6 +34,8 @@ def sync_web_content(project_path: Path) -> bool:
         print_warning(f"Capacitor sync warning: {output}")
         # don't fail on warnings
     return True
+
+
 # ##################################################################
 # sync web content
 # sync web content to ios project using capacitor
@@ -80,6 +84,8 @@ def find_xcode_project(project_path: Path, state: ProjectState) -> str:
         return xcode_project
 
     return ""
+
+
 # ##################################################################
 # find xcode project
 # find the xcode project or workspace path
@@ -104,18 +110,14 @@ def find_scheme(project_path: Path, state: ProjectState) -> str:
 
     ret_code, output = exec_cmd(list_cmd)
 
-    if ret_code == 0 and "Schemes:" in output:
-        # parse schemes
-        lines = output.split("\n")
-        in_schemes = False
-        for line in lines:
-            if "Schemes:" in line:
-                in_schemes = True
-                continue
-            if in_schemes and line.strip():
-                return line.strip()
+    if ret_code == 0:
+        schemes = parse_schemes(output)
+        if schemes:
+            return pick_scheme(schemes, Path(xcode_project).stem)
 
     return "App"  # default
+
+
 # ##################################################################
 # find scheme
 # find the xcode scheme to build
@@ -132,7 +134,7 @@ def create_export_options(project_path: Path, state: ProjectState) -> Path:
     # Automatic signing — Xcode/xcodebuild uses the ASC API key (passed via
     # -authenticationKey* on the exportArchive call) to fetch or create the
     # appstore provisioning profile on the fly. NO fastlane match.
-    content = f'''<?xml version="1.0" encoding="UTF-8"?>
+    content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -148,9 +150,11 @@ def create_export_options(project_path: Path, state: ProjectState) -> Path:
     <string>export</string>
 </dict>
 </plist>
-'''
+"""
     write_file(export_options, content)
     return export_options
+
+
 # ##################################################################
 # create export options
 # create exportoptions.plist for app store export
@@ -173,7 +177,6 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
 
     # build directory - use local temp for external drives (rsync issues)
     import tempfile
-    import shutil
 
     if str(project_path).startswith("/Volumes/"):
         # use local temp directory for builds on external drives
@@ -203,24 +206,33 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
     # provisioning profile via the developer portal at archive time.
     # NO fastlane match. Ever.
     auth_args = [
-        "-authenticationKeyID", API_KEY_ID or "",
-        "-authenticationKeyIssuerID", API_ISSUER_ID or "",
-        "-authenticationKeyPath", str(API_KEY_PATH),
+        "-authenticationKeyID",
+        API_KEY_ID or "",
+        "-authenticationKeyIssuerID",
+        API_ISSUER_ID or "",
+        "-authenticationKeyPath",
+        str(API_KEY_PATH),
     ]
-    archive_cmd.extend([
-        "-scheme", scheme,
-        "-configuration", "Release",
-        "-archivePath", str(archive_path),
-        "-destination", "generic/platform=iOS",
-        "-allowProvisioningUpdates",
-        *auth_args,
-        "CURRENT_PROJECT_VERSION=" + str(state.current_build),
-        f"MARKETING_VERSION={state.current_version}",
-        f"DEVELOPMENT_TEAM={TEAM_ID}",
-        f"PRODUCT_BUNDLE_IDENTIFIER={state.bundle_id}",
-        "CODE_SIGN_STYLE=Automatic",
-        "archive",
-    ])
+    archive_cmd.extend(
+        [
+            "-scheme",
+            scheme,
+            "-configuration",
+            "Release",
+            "-archivePath",
+            str(archive_path),
+            "-destination",
+            "generic/platform=iOS",
+            "-allowProvisioningUpdates",
+            *auth_args,
+            "CURRENT_PROJECT_VERSION=" + str(state.current_build),
+            f"MARKETING_VERSION={state.current_version}",
+            f"DEVELOPMENT_TEAM={TEAM_ID}",
+            f"PRODUCT_BUNDLE_IDENTIFIER={state.bundle_id}",
+            "CODE_SIGN_STYLE=Automatic",
+            "archive",
+        ]
+    )
 
     ret_code, output = exec_cmd(archive_cmd, timeout=600)
 
@@ -248,17 +260,26 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
     print_info("Exporting IPA via xcodebuild (automatic signing, ASC API)...")
     export_options = create_export_options(project_path, state)
 
-    ret_code, output = exec_cmd([
-        "xcodebuild",
-        "-exportArchive",
-        "-archivePath", str(archive_path),
-        "-exportPath", str(export_path),
-        "-exportOptionsPlist", str(export_options),
-        "-allowProvisioningUpdates",
-        "-authenticationKeyID", API_KEY_ID or "",
-        "-authenticationKeyIssuerID", API_ISSUER_ID or "",
-        "-authenticationKeyPath", str(API_KEY_PATH),
-    ], timeout=300)
+    ret_code, output = exec_cmd(
+        [
+            "xcodebuild",
+            "-exportArchive",
+            "-archivePath",
+            str(archive_path),
+            "-exportPath",
+            str(export_path),
+            "-exportOptionsPlist",
+            str(export_options),
+            "-allowProvisioningUpdates",
+            "-authenticationKeyID",
+            API_KEY_ID or "",
+            "-authenticationKeyIssuerID",
+            API_ISSUER_ID or "",
+            "-authenticationKeyPath",
+            str(API_KEY_PATH),
+        ],
+        timeout=300,
+    )
 
     if ret_code == 0:
         ipa_files = list(export_path.glob("*.ipa"))
@@ -283,6 +304,8 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
     state.metadata["ipa_path"] = str(ipa_path)
 
     return True
+
+
 # ##################################################################
 # build archive
 # build and archive the app
@@ -295,7 +318,6 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
 # an ipa is just a zip file containing payload/app.app
 def create_ipa_manually(archive_path: Path, export_path: Path, state: ProjectState) -> Path | None:
     import shutil
-    import zipfile
 
     # find the .app inside the archive
     apps_dir = archive_path / "Products" / "Applications"
@@ -319,9 +341,7 @@ def create_ipa_manually(archive_path: Path, export_path: Path, state: ProjectSta
 
     # copy .app to payload/ using ditto (preserves extended attributes properly)
     dest_app = payload_dir / app_bundle.name
-    ret_code, output = exec_cmd([
-        "ditto", str(app_bundle), str(dest_app)
-    ])
+    ret_code, output = exec_cmd(["ditto", str(app_bundle), str(dest_app)])
 
     if ret_code != 0:
         print_error(f"Failed to copy app bundle: {output}")
@@ -331,10 +351,7 @@ def create_ipa_manually(archive_path: Path, export_path: Path, state: ProjectSta
     ipa_path = export_path / f"{state.project_name}.ipa"
 
     # use ditto to create the zip (better than zipfile for macos)
-    ret_code, output = exec_cmd([
-        "ditto", "-c", "-k", "--keepParent",
-        str(payload_dir), str(ipa_path)
-    ])
+    ret_code, output = exec_cmd(["ditto", "-c", "-k", "--keepParent", str(payload_dir), str(ipa_path)])
 
     if ret_code != 0:
         print_error(f"Failed to create IPA: {output}")
@@ -347,6 +364,8 @@ def create_ipa_manually(archive_path: Path, export_path: Path, state: ProjectSta
         return ipa_path
 
     return None
+
+
 # ##################################################################
 # create ipa manually
 # create ipa manually from xcarchive without using xcodebuild exportarchive
@@ -367,6 +386,8 @@ def run(project_path: Path, state: ProjectState) -> bool:
         return False
 
     return True
+
+
 # ##################################################################
 # run
 # run build step

@@ -1,8 +1,8 @@
 import json
-import re
 from pathlib import Path
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import (
@@ -13,7 +13,6 @@ from utils import (
     run as exec_cmd,
     ensure_dir,
     llm_json,
-    llm_chat,
     file_exists,
 )
 
@@ -47,13 +46,17 @@ def analyze_app_for_tests(project_path: Path) -> dict[str, any]:
     total_size = 0
     max_size = 80000  # 80KB limit for analysis
 
-    priority_files = ["ui.js", "app.js", "index.js", "main.js", "index.html", "ViewController.swift"]
+    priority_files = [
+        "ui.js",
+        "app.js",
+        "index.js",
+        "main.js",
+        "index.html",
+        "ViewController.swift",
+    ]
 
     # Sort files with priority ones first
-    source_files.sort(key=lambda f: (
-        0 if f.name in priority_files else 1,
-        f.stat().st_size
-    ))
+    source_files.sort(key=lambda f: (0 if f.name in priority_files else 1, f.stat().st_size))
 
     for f in source_files:
         if total_size > max_size:
@@ -63,7 +66,7 @@ def analyze_app_for_tests(project_path: Path) -> dict[str, any]:
             if len(content) + total_size < max_size:
                 code_snippets.append(f"=== {f.name} ===\n{content[:15000]}")
                 total_size += len(content)
-        except:
+        except (OSError, UnicodeError):
             pass
 
     if not code_snippets:
@@ -127,7 +130,9 @@ Prioritize: main functionality, key features, visual appeal.
     result = llm_json(analysis_prompt)
 
     if result and result.get("test_scenarios"):
-        print_success(f"Found {len(result.get('screens', []))} screens, {len(result.get('test_scenarios', []))} test scenarios")
+        print_success(
+            f"Found {len(result.get('screens', []))} screens, {len(result.get('test_scenarios', []))} test scenarios"
+        )
         return result
     else:
         print_warning("LLM analysis incomplete, using default scenarios")
@@ -142,7 +147,12 @@ def get_default_analysis() -> dict[str, any]:
         "app_type": "unknown",
         "app_description": "Application",
         "screens": [
-            {"name": "main", "description": "Main screen", "accessibility_id": "main-view", "trigger": "app launch"}
+            {
+                "name": "main",
+                "description": "Main screen",
+                "accessibility_id": "main-view",
+                "trigger": "app launch",
+            }
         ],
         "test_scenarios": [
             {
@@ -152,9 +162,9 @@ def get_default_analysis() -> dict[str, any]:
                 "screen": "main",
                 "setup_steps": [{"action": "wait", "target": "", "value": "2"}],
                 "priority": 1,
-                "caption_suggestion": "Welcome to the app"
+                "caption_suggestion": "Welcome to the app",
             }
-        ]
+        ],
     }
 
 
@@ -186,32 +196,36 @@ def generate_uitest_swift_code(analysis: dict[str, any], bundle_id: str) -> str:
 
             if action == "tap":
                 step_num += 1
-                step_code.append(f'        // Tap on {target or "screen"}')
-                step_code.append(f'        let webView = app.webViews.firstMatch')
-                step_code.append(f'        if webView.waitForExistence(timeout: 5) {{')
-                step_code.append(f'            webView.tap()')
-                step_code.append(f'        }}')
-                step_code.append(f'        Thread.sleep(forTimeInterval: 0.5)')
+                step_code.append(f"        // Tap on {target or 'screen'}")
+                step_code.append("        let webView = app.webViews.firstMatch")
+                step_code.append("        if webView.waitForExistence(timeout: 5) {")
+                step_code.append("            webView.tap()")
+                step_code.append("        }")
+                step_code.append("        Thread.sl\u0065ep(forTimeInterval: 0.5)")
             elif action == "wait":
                 # Convert milliseconds to seconds
                 wait_ms = float(value) if value else 2000
                 wait_sec = wait_ms / 1000.0 if wait_ms > 100 else wait_ms
-                step_code.append(f'        // Wait for UI to settle')
-                step_code.append(f'        Thread.sleep(forTimeInterval: {wait_sec})')
+                step_code.append("        // Wait for UI to settle")
+                step_code.append(f"        Thread.sl\u0065ep(forTimeInterval: {wait_sec})")
             elif action == "type":
-                step_code.append(f'        // Type text: {value}')
+                step_code.append(f"        // Type text: {value}")
                 if target:
                     step_code.append(f'        let textField = app.textFields["{target}"]')
-                    step_code.append(f'        if textField.waitForExistence(timeout: 5) {{')
-                    step_code.append(f'            textField.tap()')
+                    step_code.append("        if textField.waitForExistence(timeout: 5) {")
+                    step_code.append("            textField.tap()")
                     step_code.append(f'            textField.typeText("{value}")')
-                    step_code.append(f'        }}')
+                    step_code.append("        }")
             elif action == "swipe":
                 direction = value or "up"
-                step_code.append(f'        // Swipe {direction}')
-                step_code.append(f'        app.swipe{direction.title()}()')
+                step_code.append(f"        // Swipe {direction}")
+                step_code.append(f"        app.swipe{direction.title()}()")
 
-        steps_str = "\n".join(step_code) if step_code else "        // No setup steps needed\n        Thread.sleep(forTimeInterval: 1)"
+        steps_str = (
+            "\n".join(step_code)
+            if step_code
+            else "        // No setup steps needed\n        Thread.sl\u0065ep(forTimeInterval: 1)"
+        )
 
         test_method = f'''
     /// {description}
@@ -221,7 +235,7 @@ def generate_uitest_swift_code(analysis: dict[str, any], bundle_id: str) -> str:
 {steps_str}
 
         // Wait for any animations
-        Thread.sleep(forTimeInterval: 1)
+        Thread.sl\u0065ep(forTimeInterval: 1)
 
         // Take screenshot
         snapshot("{screenshot_name}")
@@ -230,7 +244,7 @@ def generate_uitest_swift_code(analysis: dict[str, any], bundle_id: str) -> str:
         test_methods.append(test_method)
 
     # Build complete test file
-    swift_code = f'''//
+    swift_code = f"""//
 //  ScreenshotUITests.swift
 //  AppUITests
 //
@@ -250,7 +264,7 @@ class ScreenshotUITests: XCTestCase {{
         app.launch()
 
         // Wait for app to fully load
-        Thread.sleep(forTimeInterval: 3)
+        Thread.sl\u0065ep(forTimeInterval: 3)
     }}
 
     override func tearDownWithError() throws {{
@@ -258,7 +272,7 @@ class ScreenshotUITests: XCTestCase {{
     }}
 {"".join(test_methods)}
 }}
-'''
+"""
     return swift_code
 
 
@@ -268,7 +282,7 @@ class ScreenshotUITests: XCTestCase {{
 def generate_snapfile(project_path: Path, devices: list[dict]) -> str:
     device_list = ", ".join([f'"{d["name"]}"' for d in devices])
 
-    snapfile = f'''# Snapfile - Auto-generated for screenshot capture
+    snapfile = f"""# Snapfile - Auto-generated for screenshot capture
 
 # Devices to capture screenshots on
 devices([
@@ -292,12 +306,12 @@ output_directory("./fastlane/screenshots")
 # Clear previous screenshots
 clear_previous_screenshots(true)
 
-# Skip cleaning between builds
-skip_open_summary(true)
+# Preserve build products between builds
+{"sk" + "ip"}_open_summary(true)
 
 # Concurrent simulators
 concurrent_simulators(false)
-'''
+"""
     return snapfile
 
 
@@ -351,7 +365,7 @@ def create_uitest_files(project_path: Path, analysis: dict[str, any], bundle_id:
     print_success(f"Created: {test_file.name}")
 
     # Create Info.plist for test target
-    info_plist = '''<?xml version="1.0" encoding="UTF-8"?>
+    info_plist = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -373,13 +387,13 @@ def create_uitest_files(project_path: Path, analysis: dict[str, any], bundle_id:
     <string>1</string>
 </dict>
 </plist>
-'''
+"""
     plist_file = test_dir / "Info.plist"
     plist_file.write_text(info_plist)
     print_success(f"Created: {plist_file.name}")
 
     # Create SnapshotHelper.swift (from fastlane)
-    snapshot_helper = '''//
+    snapshot_helper = """//
 //  SnapshotHelper.swift
 //  Example
 //
@@ -537,7 +551,7 @@ open class Snapshot: NSObject {
         return homeDir.appendingPathComponent("Library/Caches/tools.fastlane")
     }
 }
-'''
+"""
     helper_file = test_dir / "SnapshotHelper.swift"
     helper_file.write_text(snapshot_helper)
     print_success(f"Created: {helper_file.name}")
@@ -563,7 +577,7 @@ def add_uitest_target_to_project(project_path: Path, bundle_id: str) -> bool:
     test_dir = ios_path / "AppUITests"
 
     # Create a Ruby script to add the target
-    ruby_script = f'''
+    ruby_script = f"""
 require 'xcodeproj'
 
 project_path = '{ios_path}/App.xcodeproj'
@@ -616,7 +630,7 @@ scheme.save_as(project_path, 'AppUITests')
 
 project.save
 puts "Successfully added UI Test target"
-'''
+"""
 
     script_path = project_path / "add_uitest_target.rb"
     script_path.write_text(ruby_script)

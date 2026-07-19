@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState, load_state, save_state
@@ -9,7 +10,6 @@ from utils import (
     print_info,
     print_success,
     print_warning,
-    llm_json,
     ensure_dir,
     write_file,
     file_exists,
@@ -22,7 +22,7 @@ from utils import (
 def generate_privacy_policy(state: ProjectState) -> str:
     prompt = f"""Generate a simple, clear privacy policy for an iOS app called "{state.app_name}".
 
-App description: {state.app_description[:300] if state.app_description else 'A mobile application'}
+App description: {state.app_description[:300] if state.app_description else "A mobile application"}
 
 The privacy policy should:
 - Be suitable for a simple app that doesn't collect personal data
@@ -33,11 +33,12 @@ The privacy policy should:
 Respond with ONLY the privacy policy text, no other formatting.
 """
     from utils import llm_chat
+
     policy = llm_chat(prompt)
     if not policy:
         return f"""Privacy Policy for {state.app_name}
 
-Last updated: {__import__('datetime').datetime.now().strftime('%B %d, %Y')}
+Last updated: {__import__("datetime").datetime.now().strftime("%B %d, %Y")}
 
 This privacy policy describes how {state.app_name} ("we", "our", or "the app") handles information.
 
@@ -60,6 +61,8 @@ Contact
 If you have questions about this privacy policy, please contact us through the App Store.
 """
     return policy
+
+
 # ##################################################################
 # generate privacy policy
 # generate a privacy policy for the app
@@ -86,6 +89,8 @@ def generate_age_rating_answers(state: ProjectState) -> dict[str, str]:
         "UNRESTRICTED_WEB_ACCESS": "NONE",
         "GAMBLING_CONTESTS": "NONE",
     }
+
+
 # ##################################################################
 # generate age rating answers
 # generate age rating questionnaire answers
@@ -111,6 +116,8 @@ No login or account is required. All functionality is available immediately.
 If you have any questions during the review, please don't hesitate to contact us.
 """,
     }
+
+
 # ##################################################################
 # generate review info
 # generate app review information
@@ -120,7 +127,7 @@ If you have any questions during the review, please don't hesitate to contact us
 # run
 # run metadata step
 # creates privacy policy, review information, and age rating configuration
-def run(project_path: Path, state: ProjectState) -> bool:
+def run(project_path: Path, state: ProjectState, privacy_policy: str | None = None) -> bool:
     metadata_dir = project_path / "fastlane" / "metadata" / "en-US"
     ensure_dir(metadata_dir)
 
@@ -134,7 +141,8 @@ def run(project_path: Path, state: ProjectState) -> bool:
 
     # generate privacy policy markdown (actual URLs set by support module)
     print_info("Generating privacy policy...")
-    privacy_policy = generate_privacy_policy(state)
+    if privacy_policy is None:
+        privacy_policy = generate_privacy_policy(state)
     write_file(project_path / "PRIVACY_POLICY.md", privacy_policy)
     print_success("Privacy policy created")
 
@@ -143,8 +151,12 @@ def run(project_path: Path, state: ProjectState) -> bool:
 
     # copyright
     import datetime
+
     year = datetime.datetime.now().year
-    write_file(metadata_dir / "copyright.txt", f"Copyright {year} {CONTACT_FIRST_NAME} {CONTACT_LAST_NAME}")
+    write_file(
+        metadata_dir / "copyright.txt",
+        f"Copyright {year} {CONTACT_FIRST_NAME} {CONTACT_LAST_NAME}",
+    )
 
     # age rating
     print_info("Configuring age rating...")
@@ -169,6 +181,8 @@ def run(project_path: Path, state: ProjectState) -> bool:
     print_success("All metadata generated")
 
     return True
+
+
 # ##################################################################
 # run
 # run metadata step
@@ -190,6 +204,7 @@ if __name__ == "__main__":
         _sys.exit(1)
 
     from utils import print_error
+
     success = run(project_path, state)
     if success:
         save_state(project_path, state)

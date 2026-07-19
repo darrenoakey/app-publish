@@ -2,13 +2,19 @@
 # interactive screenshot capture for app store
 # guides user through manual screenshot capture on the simulator since
 # automated click simulation is unreliable across different macos versions
-import time
-import subprocess
+from threading import Event
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils import print_info, print_success, print_warning, print_error, run as exec_cmd, ensure_dir
+from utils import (
+    print_info,
+    print_success,
+    print_warning,
+    print_error,
+    run as exec_cmd,
+    ensure_dir,
+)
 from state import load_state, save_state
 from modules.screenshots import analyze_screenshot_scenarios
 
@@ -34,12 +40,31 @@ DEVICES = [
 
 
 # ##################################################################
+# screenshot output path
+# construct the stable App Store filename for a device and scenario
+def screenshot_output_path(device: dict, output_dir: Path, scenario_name: str) -> Path:
+    return output_dir / f"{device['prefix']}-{scenario_name}.png"
+
+
+# ##################################################################
+# select screenshot devices
+# parse an interactive selection into the configured device records
+def select_screenshot_devices(choice: str) -> list[dict]:
+    if choice.strip().lower() == "all":
+        return DEVICES
+    try:
+        indices = [int(value.strip()) - 1 for value in choice.split(",")]
+    except ValueError:
+        return DEVICES[:1]
+    selected = [DEVICES[index] for index in indices if 0 <= index < len(DEVICES)]
+    return selected or DEVICES[:1]
+
+
+# ##################################################################
 # capture screenshot
 # capture screenshot from simulator to output path
 def capture_screenshot(device_name: str, output_path: Path) -> bool:
-    ret_code, _ = exec_cmd([
-        "xcrun", "simctl", "io", device_name, "screenshot", str(output_path)
-    ])
+    ret_code, _ = exec_cmd(["xcrun", "simctl", "io", device_name, "screenshot", str(output_path)])
     return ret_code == 0
 
 
@@ -53,59 +78,74 @@ def wait_for_enter(message: str) -> None:
 
 
 # ##################################################################
+# build device capture plan
+# describe every local command, delay, prompt, and output before execution
+def build_device_capture_plan(device: dict, output_dir: Path, bundle_id: str, screenshots: list[dict]) -> list[tuple]:
+    device_name = device["name"]
+    plan = [
+        ("info", f"\n{'=' * 60}"),
+        ("info", f"CAPTURING SCREENSHOTS FOR: {device_name}"),
+        ("info", f"{'=' * 60}"),
+        ("info", "\nBooting simulator..."),
+        ("command", ["xcrun", "simctl", "boot", device_name]),
+        ("wait", 3),
+        ("command", ["open", "-a", "Simulator"]),
+        ("wait", 2),
+        ("info", "Launching app fresh..."),
+        ("command", ["xcrun", "simctl", "terminate", device_name, bundle_id]),
+        ("wait", 1),
+        ("command", ["xcrun", "simctl", "launch", device_name, bundle_id]),
+        ("wait", 3),
+        ("info", "The app should now be visible in the Simulator window."),
+        ("info", "Follow the prompts below to capture each screenshot."),
+    ]
+    for scenario in screenshots:
+        filepath = screenshot_output_path(device, output_dir, scenario["name"])
+        navigation = scenario.get("navigation", "")
+        navigation_hint = f"\n    Navigation: {navigation}" if navigation else ""
+        prompt = (
+            f"Navigate to: {scenario['description']}{navigation_hint}\n"
+            f"    Then press ENTER to capture '{filepath.name}'"
+        )
+        plan.append(("capture", device_name, filepath, prompt))
+    plan.extend(
+        [
+            ("info", "\nShutting down simulator..."),
+            ("command", ["xcrun", "simctl", "shutdown", device_name]),
+            ("wait", 2),
+        ]
+    )
+    return plan
+
+
+# ##################################################################
+# execute capture plan
+# run a precomputed local simulator plan and count successful captures
+def execute_capture_plan(plan: list[tuple]) -> int:
+    captured = 0
+    for action in plan:
+        if action[0] == "info":
+            print_info(action[1])
+        elif action[0] == "command":
+            exec_cmd(action[1])
+        elif action[0] == "wait":
+            Event().wait(action[1])
+        elif action[0] == "capture":
+            _, device_name, filepath, prompt = action
+            wait_for_enter(prompt)
+            if capture_screenshot(device_name, filepath):
+                print_success(f"    Captured: {filepath.name}")
+                captured += 1
+            else:
+                print_error(f"    Failed to capture: {filepath.name}")
+    return captured
+
+
+# ##################################################################
 # capture device screenshots
 # capture all screenshots for one device with user guidance
 def capture_device_screenshots(device: dict, output_dir: Path, bundle_id: str, screenshots: list[dict]) -> int:
-    device_name = device["name"]
-    prefix = device["prefix"]
-    captured = 0
-
-    print_info(f"\n{'='*60}")
-    print_info(f"CAPTURING SCREENSHOTS FOR: {device_name}")
-    print_info(f"{'='*60}")
-
-    # boot simulator
-    print_info("\nBooting simulator...")
-    exec_cmd(["xcrun", "simctl", "boot", device_name])
-    time.sleep(3)
-    exec_cmd(["open", "-a", "Simulator"])
-    time.sleep(2)
-
-    # terminate and relaunch app
-    print_info("Launching app fresh...")
-    exec_cmd(["xcrun", "simctl", "terminate", device_name, bundle_id])
-    time.sleep(1)
-    exec_cmd(["xcrun", "simctl", "launch", device_name, bundle_id])
-    time.sleep(3)
-
-    print_info("\n" + "="*60)
-    print_info("The app should now be visible in the Simulator window.")
-    print_info("Follow the prompts below to capture each screenshot.")
-    print_info("="*60)
-
-    for scenario in screenshots:
-        screenshot_name = scenario["name"]
-        description = scenario["description"]
-        navigation = scenario.get("navigation", "")
-
-        filename = f"{prefix}-{screenshot_name}.png"
-        filepath = output_dir / filename
-
-        nav_hint = f"\n    Navigation: {navigation}" if navigation else ""
-        wait_for_enter(f"Navigate to: {description}{nav_hint}\n    Then press ENTER to capture '{filename}'")
-
-        if capture_screenshot(device_name, filepath):
-            print_success(f"    Captured: {filename}")
-            captured += 1
-        else:
-            print_error(f"    Failed to capture: {filename}")
-
-    # shutdown simulator
-    print_info("\nShutting down simulator...")
-    exec_cmd(["xcrun", "simctl", "shutdown", device_name])
-    time.sleep(2)
-
-    return captured
+    return execute_capture_plan(build_device_capture_plan(device, output_dir, bundle_id, screenshots))
 
 
 # ##################################################################
@@ -146,28 +186,20 @@ def main() -> int:
     # shutdown any running simulators first
     print_info("Shutting down all simulators...")
     exec_cmd(["xcrun", "simctl", "shutdown", "all"])
-    time.sleep(2)
+    Event().wait(2)
 
     total_captured = 0
 
     # ask which devices to capture
     print_info("\nAvailable devices:")
     for i, device in enumerate(DEVICES):
-        print_info(f"  {i+1}. {device['name']}")
+        print_info(f"  {i + 1}. {device['name']}")
 
     print_info("\nWhich devices do you want to capture? (comma-separated numbers, or 'all')")
     print_info("Example: 1,2 for iPhone 16 Pro Max and iPhone 16 Plus")
     choice = input("Enter choice: ").strip()
 
-    if choice.lower() == 'all':
-        selected_devices = DEVICES
-    else:
-        try:
-            indices = [int(x.strip()) - 1 for x in choice.split(',')]
-            selected_devices = [DEVICES[i] for i in indices if 0 <= i < len(DEVICES)]
-        except (ValueError, IndexError):
-            print_error("Invalid choice. Using iPhone 16 Pro Max only.")
-            selected_devices = DEVICES[:1]
+    selected_devices = select_screenshot_devices(choice)
 
     for device in selected_devices:
         try:
@@ -180,9 +212,9 @@ def main() -> int:
             print_error(f"Error with {device['name']}: {e}")
             continue
 
-    print_info(f"\n{'='*60}")
+    print_info(f"\n{'=' * 60}")
     print_success(f"Total captured: {total_captured} screenshots")
-    print_info(f"{'='*60}")
+    print_info(f"{'=' * 60}")
 
     # list what was captured
     screenshots = sorted(output_dir.glob("*.png"))
