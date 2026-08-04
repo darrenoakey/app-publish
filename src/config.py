@@ -146,8 +146,8 @@ def _validate_secrets() -> None:
         print("\nTo add a secret, run the interactive setup (writes a prompt-free,")
         print("allow-all keychain item via /usr/bin/security):")
         print("  python3 src/setup_secrets.py")
-        print("\nOr set one directly:")
-        print(f"  security add-generic-password -s {SERVICE_NAME} -a {_missing_secrets[0]} -w 'your_value_here' -A -U")
+        print("\nOr set one directly (prompt-free write via kc):")
+        print(f"  kc set {SERVICE_NAME} {_missing_secrets[0]} 'your_value_here'")
         sys.exit(1)
 
 
