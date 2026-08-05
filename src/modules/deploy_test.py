@@ -7,8 +7,8 @@ from modules.deploy import (
     detect_bundle_id,
     detect_project_type,
     ensure_dev_profile,
+    find_connected_devices,
     install_on_device,
-    load_auth_args,
     parse_devicectl_devices,
     parse_ios_deploy_devices,
     parse_xctrace_devices,
@@ -88,7 +88,14 @@ def test_local_deploy_boundaries_fail_before_any_device_change(tmp_path) -> None
     assert detect_project_type(tmp_path) == ("native", native, "Reader")
     assert detect_bundle_id(tmp_path) is None
     assert ensure_dev_profile("com.example.reader") is True
-    assert build_for_device(tmp_path / "missing", "com.example.reader") is None
+    assert (
+        build_for_device(
+            tmp_path / "missing",
+            "com.example.reader",
+            "00008150-000611360AC0401C",
+        )
+        is None
+    )
 
     command_directory = tmp_path / "node_modules" / ".bin"
     command_directory.mkdir(parents=True)
@@ -97,22 +104,10 @@ def test_local_deploy_boundaries_fail_before_any_device_change(tmp_path) -> None
     assert install_on_device(str(tmp_path / "Missing.app"), "missing-device-id") is False
 
 
-def test_app_store_auth_arguments_are_loaded_from_real_local_files(tmp_path) -> None:
-    assert load_auth_args(tmp_path) == []
-    key_file = tmp_path / "api_key.json"
-    key_file.write_text("not json")
-    assert load_auth_args(tmp_path) == []
-    key_file.write_text("{}")
-    assert load_auth_args(tmp_path) == []
-    private_key = tmp_path / "private_keys" / "AuthKey_LOCAL.p8"
-    private_key.parent.mkdir()
-    private_key.write_text("local key material")
-    key_file.write_text(json.dumps({"key_id": "LOCAL", "issuer_id": "issuer-local"}))
-    assert load_auth_args(tmp_path) == [
-        "-authenticationKeyID",
-        "LOCAL",
-        "-authenticationKeyIssuerID",
-        "issuer-local",
-        "-authenticationKeyPath",
-        str(private_key),
-    ]
+def test_connected_device_discovery_uses_the_real_apple_toolchain() -> None:
+    devices = find_connected_devices()
+    assert isinstance(devices, list)
+    for device in devices:
+        assert set(device) == {"id", "name", "model", "os"}
+        assert device["id"]
+        assert device["name"]

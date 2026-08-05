@@ -3,7 +3,9 @@
 # ai-generated app icon with all required sizes
 # uses a deterministic prompt, the durable codex image queue, and pil to resize to all ios sizes
 import json
+import hashlib
 from pathlib import Path
+import shutil
 
 import sys
 
@@ -24,6 +26,16 @@ from utils import (
 
 GENERATE_IMAGE_CLI = "/Users/darrenoakey/bin/generate_image"
 ICON_OPERATION_STATE = "icon-1024.image-job.json"
+ICON_RESPONSE_CACHE = Path.home() / "Library" / "Caches" / "app-publish" / "icon-responses"
+
+
+def icon_cache_path(prompt: str) -> Path:
+    request = json.dumps(
+        {"height": ICON_SIZE, "prompt": prompt, "transparent": False, "width": ICON_SIZE},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return ICON_RESPONSE_CACHE / f"{hashlib.sha256(request).hexdigest()}.png"
 
 
 def generate_icon_prompt(state: ProjectState) -> str:
@@ -77,6 +89,13 @@ def generate_master_icon(project_path: Path, state: ProjectState) -> Path | None
 
     icon_prompt = generate_icon_prompt(state)
     print_info(f"Icon prompt: {icon_prompt[:80]}...")
+    cached_icon = icon_cache_path(icon_prompt)
+    if is_valid_master_icon(cached_icon):
+        master_icon.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(cached_icon, master_icon)
+        master_icon.chmod(0o600)
+        print_success(f"Recovered master icon from real-response cache: {master_icon}")
+        return master_icon
 
     print_info("Generating icon image through the durable Mac-mini Codex queue...")
     ret_code, output = exec_cmd(
@@ -90,8 +109,6 @@ def generate_master_icon(project_path: Path, state: ProjectState) -> Path | None
             str(ICON_SIZE),
             "--state-file",
             str(operation_state),
-            "--timeout",
-            "inf",
             "--prompt",
             icon_prompt,
         ]
@@ -103,6 +120,12 @@ def generate_master_icon(project_path: Path, state: ProjectState) -> Path | None
     if not is_valid_master_icon(master_icon):
         print_error(f"Image service did not persist a valid {ICON_SIZE}x{ICON_SIZE} PNG at {master_icon}: {output}")
         return None
+
+    cached_icon.parent.mkdir(parents=True, exist_ok=True)
+    temporary_cache = cached_icon.with_suffix(".tmp")
+    shutil.copyfile(master_icon, temporary_cache)
+    temporary_cache.replace(cached_icon)
+    cached_icon.chmod(0o600)
 
     print_success(f"Master icon generated: {master_icon}")
     return master_icon

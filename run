@@ -20,6 +20,8 @@ def run_command(cmd: list[str]) -> int:
 # command deploy
 # deploy app to ios device
 def command_deploy(args: argparse.Namespace) -> int:
+    if args.project is None and Path.cwd().resolve() == SCRIPT_DIR:
+        return command_health(args)
     project = args.project or os.environ.get("APP_PUBLISH_PROJECT") or os.getcwd()
     device = args.device or "Starbuck"
     return run_command([
@@ -116,6 +118,30 @@ def command_check(args: argparse.Namespace) -> int:
 
 
 # ##################################################################
+# command health
+# prove the canonical command, encrypted signing identity, and Apple API work
+def command_health(args: argparse.Namespace) -> int:
+    sys.path.insert(0, str(SCRIPT_DIR / "src"))
+    from apple_portal import P12_ACCOUNT, SERVICE, request, secrets_store
+    from modules.signing import _rcodesign_binary
+
+    if secrets_store.get_secret_bytes(SERVICE, P12_ACCOUNT) is None:
+        print("ERROR: encrypted Apple distribution identity is unavailable", file=sys.stderr)
+        return 1
+    _rcodesign_binary()
+    bundles = request(
+        "GET",
+        "bundleIds",
+        params={"filter[identifier]": "com.darrenoakey.olBridge", "limit": 2},
+    )
+    if len(bundles.get("data", [])) != 1:
+        print("ERROR: App Store Connect health probe returned the wrong bundle", file=sys.stderr)
+        return 1
+    print("app-publish provider, signing identity, and Apple API are healthy")
+    return 0
+
+
+# ##################################################################
 # main
 # parse arguments and dispatch to appropriate command
 def main(argv: list[str]) -> int:
@@ -165,6 +191,10 @@ def main(argv: list[str]) -> int:
     # check
     p_check = sub.add_parser("check", help="Run full test suite and gates (dazpycheck)")
     p_check.set_defaults(func=command_check)
+
+    # health
+    p_health = sub.add_parser("health", help="Verify the canonical prompt-free publishing dependencies")
+    p_health.set_defaults(func=command_health)
 
     args = parser.parse_args(argv)
 

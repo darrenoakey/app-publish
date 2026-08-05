@@ -15,6 +15,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import TEAM_ID
+from modules.signing import sign_app_bundle
 from state import ProjectState, load_state
 from utils import (
     print_info,
@@ -199,33 +200,14 @@ def find_connected_devices() -> list[dict]:
     return devices
 
 
-def load_auth_args(asc_dir: Path) -> list[str]:
-    api_key_json = asc_dir / "api_key.json"
-    if not api_key_json.exists():
-        return []
-    try:
-        data = json.loads(api_key_json.read_text())
-        key_id = data.get("key_id")
-        issuer_id = data.get("issuer_id")
-        p8_path = asc_dir / "private_keys" / f"AuthKey_{key_id}.p8"
-        if key_id and issuer_id and p8_path.exists():
-            return [
-                "-authenticationKeyID",
-                key_id,
-                "-authenticationKeyIssuerID",
-                issuer_id,
-                "-authenticationKeyPath",
-                str(p8_path),
-            ]
-    except (json.JSONDecodeError, OSError):
-        return []
-    return []
-
-
 # ##################################################################
 # build for device
-# builds the app for a real device using development signing
-def build_for_device(project_path: Path, bundle_id: str) -> str | None:
+# builds unsigned, then applies an ad-hoc distribution profile for the device
+def build_for_device(
+    project_path: Path,
+    bundle_id: str,
+    device_udid: str,
+) -> str | None:
     project_type, xcodeproj, scheme = detect_project_type(project_path)
 
     if project_type == "unknown":
@@ -245,12 +227,6 @@ def build_for_device(project_path: Path, bundle_id: str) -> str | None:
     build_dir = project_path / "build" / "device"
     build_dir.mkdir(parents=True, exist_ok=True)
 
-    # Automatic signing only — NO fastlane match, ever.
-    # -allowProvisioningUpdates lets Xcode create/refresh the dev profile
-    # against the developer portal using the App Store Connect API key.
-    asc_dir = Path.home() / ".appstoreconnect"
-    auth_args = load_auth_args(asc_dir)
-
     xcb_args = [
         "xcrun",
         "xcodebuild",
@@ -264,12 +240,9 @@ def build_for_device(project_path: Path, bundle_id: str) -> str | None:
         "generic/platform=iOS",
         "-derivedDataPath",
         str(build_dir),
-        "-allowProvisioningUpdates",
-        *auth_args,
         f"DEVELOPMENT_TEAM={TEAM_ID}",
-        "CODE_SIGN_STYLE=Automatic",
-        "CODE_SIGN_IDENTITY=Apple Development",
-        "PROVISIONING_PROFILE_SPECIFIER=",
+        "CODE_SIGNING_ALLOWED=NO",
+        "CODE_SIGNING_REQUIRED=NO",
         "build",
     ]
     # macOS Tahoe: the Metal Toolchain shim fails when the calling shell's
@@ -305,12 +278,32 @@ def build_for_device(project_path: Path, bundle_id: str) -> str | None:
     app_name = f"{scheme}.app"
     app_path = build_dir / "Build" / "Products" / "Debug-iphoneos" / app_name
     if app_path.exists():
-        return str(app_path)
+        return (
+            str(app_path)
+            if sign_app_bundle(
+                app_path,
+                bundle_id,
+                scheme,
+                "IOS_APP_ADHOC",
+                device_udids=[device_udid],
+            )
+            else None
+        )
 
     # Search for any .app in the build output
     for app in build_dir.rglob("*.app"):
         if "Debug-iphoneos" in str(app):
-            return str(app)
+            return (
+                str(app)
+                if sign_app_bundle(
+                    app,
+                    bundle_id,
+                    scheme,
+                    "IOS_APP_ADHOC",
+                    device_udids=[device_udid],
+                )
+                else None
+            )
 
     print_error("Could not find built app bundle")
     return None
@@ -409,7 +402,7 @@ def run(project_path: Path, state: ProjectState, device_name: str = "Starbuck") 
             return False
 
     # Build for device
-    app_path = build_for_device(project_path, bundle_id)
+    app_path = build_for_device(project_path, bundle_id, device_id)
     if not app_path:
         return False
 

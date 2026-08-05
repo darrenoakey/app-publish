@@ -1,9 +1,5 @@
-import plistlib
-
-from config import TEAM_ID
 from modules.build import (
     build_archive,
-    create_export_options,
     create_ipa_manually,
     find_scheme,
     find_xcode_project,
@@ -12,18 +8,12 @@ from modules.build import (
 from state import ProjectState
 
 
-def test_xcode_discovery_and_export_options(tmp_path) -> None:
+def test_xcode_discovery(tmp_path) -> None:
     workspace = tmp_path / "ios" / "App" / "Product.xcworkspace"
     workspace.mkdir(parents=True)
     state = ProjectState()
     assert find_xcode_project(tmp_path, state) == str(workspace)
     assert state.metadata["use_workspace"] is True
-    options = create_export_options(tmp_path, state)
-    with options.open("rb") as stream:
-        data = plistlib.load(stream)
-    assert data["method"] == "app-store"
-    assert data["teamID"] == TEAM_ID
-    assert data["signingStyle"] == "automatic"
 
 
 def test_project_discovery_covers_native_locations_and_missing_projects(

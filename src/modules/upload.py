@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import (
     API_ISSUER_ID,
     API_KEY_ID,
-    API_KEY_PATH,
+    API_PRIVATE_KEY,
     CONTACT_EMAIL,
     CONTACT_FIRST_NAME,
     CONTACT_LAST_NAME,
@@ -26,7 +26,6 @@ from utils import (
     print_info,
     print_success,
     print_warning,
-    read_file,
     run as exec_cmd,
 )
 
@@ -280,7 +279,7 @@ def get_api_token() -> str:
         "aud": "appstoreconnect-v1",
     }
     headers = {"alg": "ES256", "kid": API_KEY_ID, "typ": "JWT"}
-    return jwt.encode(payload, read_file(API_KEY_PATH), algorithm="ES256", headers=headers)
+    return jwt.encode(payload, API_PRIVATE_KEY, algorithm="ES256", headers=headers)
 
 
 def get_app_id(token: str, bundle_id: str) -> str | None:

@@ -15,14 +15,12 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState, load_state, save_state
-from config import API_KEY_ID, API_ISSUER_ID, API_KEY_PATH
+from config import API_KEY_ID, API_ISSUER_ID, API_PRIVATE_KEY
 from utils import (
     print_info,
     print_success,
     print_warning,
     print_error,
-    run as exec_cmd,
-    file_exists,
 )
 
 try:
@@ -81,11 +79,8 @@ def create_jwt_token() -> str:
     if not HAS_JWT:
         return None
 
-    key_path = Path(API_KEY_PATH).expanduser()
-    if not key_path.exists():
+    if not API_PRIVATE_KEY:
         return None
-
-    private_key = key_path.read_text()
 
     # Token expires in 20 minutes
     expiration = int(time.time()) + 20 * 60
@@ -99,7 +94,7 @@ def create_jwt_token() -> str:
 
     headers = {"alg": "ES256", "kid": API_KEY_ID, "typ": "JWT"}
 
-    token = jwt.encode(payload, private_key, algorithm="ES256", headers=headers)
+    token = jwt.encode(payload, API_PRIVATE_KEY, algorithm="ES256", headers=headers)
     return token
 
 
@@ -233,102 +228,8 @@ def check_app_exists(project_path: Path, state: ProjectState, base_url: str = BA
         open_app_store_connect_and_show_instructions(state)
         return False
     else:
-        # API check failed, try fastlane
-        print_info("Trying fastlane...")
-        return check_app_exists_fastlane(project_path, state)
-
-
-# ##################################################################
-# check app exists
-# checks if app exists in app store connect and gets its id
-
-
-# ##################################################################
-# check app exists fastlane
-# check if app exists using fastlane
-def check_app_exists_fastlane(project_path: Path, state: ProjectState) -> bool:
-    # Ensure the lane exists
-    if not ensure_create_app_lane(project_path, state):
+        print_error("App Store Connect API check failed")
         return False
-
-    ret_code, output = exec_cmd(["fastlane", "ios", "create_app"], cwd=project_path, timeout=120)
-
-    app_exists, app_id = parse_fastlane_result(output)
-    if app_id:
-        state.app_store_id = app_id
-        print_info(f"App Store ID: {app_id}")
-
-    if app_exists:
-        print_success("App found in App Store Connect")
-        return True
-
-    # App doesn't exist - show instructions
-    print_warning("App not found in App Store Connect")
-    open_app_store_connect_and_show_instructions(state)
-    return False
-
-
-# ##################################################################
-# check app exists fastlane
-# check if app exists using fastlane
-
-
-# ##################################################################
-# ensure create app lane
-# ensures the create_app lane exists in fastfile
-def ensure_create_app_lane(project_path: Path, state: ProjectState) -> bool:
-    fastfile_path = project_path / "fastlane" / "Fastfile"
-
-    if not file_exists(fastfile_path):
-        print_error("Fastfile not found - run structure step first")
-        return False
-
-    content = fastfile_path.read_text()
-
-    # Check if lane already exists
-    if "lane :create_app" in content:
-        return True
-
-    lane_content = f'''
-
-  lane :create_app do
-    require 'spaceship'
-
-    bundle_id = "{state.bundle_id}"
-    app_name = "{state.app_name}"
-
-    # Authenticate with App Store Connect API
-    token = Spaceship::ConnectAPI::Token.create(
-      key_id: "{API_KEY_ID}",
-      issuer_id: "{API_ISSUER_ID}",
-      filepath: File.expand_path("{API_KEY_PATH}"),
-      in_house: false
-    )
-    Spaceship::ConnectAPI.token = token
-
-    # Check if app already exists
-    existing_app = Spaceship::ConnectAPI::App.find(bundle_id)
-    if existing_app
-      UI.success("App exists in App Store Connect: #{{existing_app.name}}")
-      UI.success("App Store ID: #{{existing_app.id}}")
-      puts "APP_STORE_ID=#{{existing_app.id}}"
-      puts "APP_EXISTS=true"
-    else
-      puts "APP_EXISTS=false"
-      UI.user_error!("App must be created in App Store Connect first")
-    end
-  end
-'''
-
-    # Insert before the final 'end'
-    if content.rstrip().endswith("end"):
-        content = content.rstrip()[:-3] + lane_content + "\nend\n"
-    else:
-        content = content + lane_content
-
-    fastfile_path.write_text(content)
-    print_info("Added create_app lane to Fastfile")
-    return True
 
 
 # ##################################################################

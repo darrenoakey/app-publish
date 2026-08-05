@@ -3,10 +3,10 @@
 from pathlib import Path
 import sys
 
-# Secrets are read via /usr/bin/security (see keychain.py) rather than the
-# in-process `keyring` module, so a Homebrew Python upgrade never triggers a
-# keychain authorisation prompt.
-import keychain
+# Secrets cross only the public daz-secrets process protocol. Darren's
+# machine-local provider keeps the encrypted storage implementation private and
+# cannot invoke an operating-system credential UI.
+import secrets_store
 
 SERVICE_NAME = "app-publish"
 
@@ -16,9 +16,9 @@ _missing_secrets: list[str] = []
 
 # ##################################################################
 # get secret
-# retrieve a secret from the system keyring for app-publish service
+# retrieve a secret from the configured app-publish provider namespace
 def get_secret(key: str, required: bool = True) -> str | None:
-    val = keychain.get_password(SERVICE_NAME, key)
+    val = secrets_store.get_secret(SERVICE_NAME, key)
     if not val and required:
         _missing_secrets.append(key)
     return val
@@ -33,7 +33,7 @@ BUNDLE_ID_PREFIX = get_secret("bundle_id_prefix")
 # app store connect api
 API_KEY_ID = get_secret("api_key_id")
 API_ISSUER_ID = get_secret("api_issuer_id")
-API_KEY_PATH = Path.home() / ".appstoreconnect" / "private_keys" / f"AuthKey_{API_KEY_ID}.p8"
+API_PRIVATE_KEY = get_secret("api_private_key")
 
 # github
 GITHUB_USER = get_secret("github_user")
@@ -135,20 +135,16 @@ SWIFT_INDICATORS = [
 
 # ##################################################################
 # validate secrets
-# check that all required secrets are present in keyring
-def _validate_secrets() -> None:
+# check that all required secrets are present in daz-secrets
+def validate_secrets() -> None:
     if _missing_secrets:
-        print("Error: Missing required secrets in keyring.")
+        print("Error: Missing required secrets in daz-secrets.")
         print(f"Service name: {SERVICE_NAME}")
         print("\nMissing secrets:")
         for key in _missing_secrets:
             print(f"  - {key}")
-        print("\nTo add a secret, run the interactive setup (writes a prompt-free,")
-        print("allow-all keychain item via /usr/bin/security):")
+        print("\nTo add a secret, run the prompt-free provider setup:")
         print("  python3 src/setup_secrets.py")
-        print("\nOr set one directly (prompt-free write via kc):")
-        print(f"  kc set {SERVICE_NAME} {_missing_secrets[0]} 'your_value_here'")
+        print("\nOr pipe one directly without exposing it in argv:")
+        print(f"  daz-secrets set {SERVICE_NAME} {_missing_secrets[0]}")
         sys.exit(1)
-
-
-_validate_secrets()

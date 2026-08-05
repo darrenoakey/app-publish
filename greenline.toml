@@ -10,13 +10,13 @@ check = "./run check"
 
 # Deploy command. cwd = the canonical checkout. Must rebuild/restart prod,
 # health-check, exit nonzero on unhealthy, and be idempotent (safe to re-run).
-deploy = "./run deploy"
+deploy = "./run health"
 
 # Optional health-only probe. Empty = re-run `deploy` as the health probe.
-health = ""
+health = "./run health"
 
 # Informational: the auto/service name this repo deploys.
-service = "app-publish"
+service = ""
 
 # Persistent worktree base for this repo (gate lives at <base>/gate).
 worktree_base = "/Volumes/Gumby/worktrees/greenline/app-publish"

@@ -16,14 +16,13 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState, load_state, save_state
-from config import API_KEY_PATH, API_KEY_ID, API_ISSUER_ID
+from config import API_KEY_ID, API_ISSUER_ID, API_PRIVATE_KEY
 from utils import (
     print_info,
     print_success,
     print_warning,
     print_error,
     run as exec_cmd,
-    read_file,
 )
 
 API_BASE_URL = "https://api.appstoreconnect.apple.com/v1"
@@ -33,8 +32,6 @@ API_BASE_URL = "https://api.appstoreconnect.apple.com/v1"
 # get api token
 # generates jwt token for app store connect api
 def get_api_token() -> str:
-    private_key = read_file(API_KEY_PATH)
-
     header = {"alg": "ES256", "kid": API_KEY_ID, "typ": "JWT"}
 
     payload = {
@@ -44,7 +41,7 @@ def get_api_token() -> str:
         "aud": "appstoreconnect-v1",
     }
 
-    return jwt.encode(payload, private_key, algorithm="ES256", headers=header)
+    return jwt.encode(payload, API_PRIVATE_KEY, algorithm="ES256", headers=header)
 
 
 # ##################################################################
@@ -94,26 +91,42 @@ def api_request(
 # ##################################################################
 # wait for build processing
 # waits for the build to finish processing in app store connect
-def wait_for_build_processing(state: ProjectState, max_wait_minutes: int = 30) -> bool:
+def wait_for_build_processing(
+    state: ProjectState,
+    max_wait_minutes: int = 30,
+    base_url: str = API_BASE_URL,
+) -> bool:
     print_info("Waiting for build to finish processing...")
     print_info("(This can take 10-30 minutes)")
 
-    api_key_json = API_KEY_PATH.parent.parent / "api_key.json"
+    try:
+        token = get_api_token()
+    except Exception as error:
+        print_error(f"Failed to generate API token: {error}")
+        return False
 
-    # Poll every 2 minutes
+    app_response = api_request(
+        "GET",
+        f"apps?filter[bundleId]={state.bundle_id}",
+        token,
+        base_url=base_url,
+    )
+    apps = app_response.get("data", []) if app_response else []
+    if not apps:
+        print_error("Could not find app while waiting for build processing")
+        return False
+    app_id = apps[0]["id"]
+
+    # Poll every 2 minutes using the same in-memory API credential path as the
+    # rest of app-publish. No Fastlane key file is created.
     for i in range(max_wait_minutes // 2):
-        # Check build status using fastlane
-        ret_code, output = exec_cmd(
-            [
-                "fastlane",
-                "run",
-                "latest_testflight_build_number",
-                "app_identifier:" + state.bundle_id,
-                "api_key_path:" + str(api_key_json),
-            ]
+        response = api_request(
+            "GET",
+            f"builds?filter[app]={app_id}&filter[version]={state.current_build}",
+            token,
+            base_url=base_url,
         )
-
-        if ret_code == 0 and str(state.current_build) in output:
+        if response and response.get("data"):
             print_success(f"Build {state.current_build} is ready")
             return True
 

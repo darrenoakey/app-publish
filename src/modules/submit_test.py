@@ -60,6 +60,8 @@ class LocalReviewHandler(BaseHTTPRequestHandler):
                 "data": {"attributes": {"appStoreState": "PREPARE_FOR_SUBMISSION"}},
                 "included": [{"type": "builds", "id": "build-local"}],
             }
+        elif self.path.startswith("/builds?"):
+            content = {"data": [{"id": "processed-build-local"}]}
         elif self.path == "/error":
             self.send_json(422, {"message": "local rejection"})
             return
@@ -114,6 +116,14 @@ def test_submit_transport_and_review_flow_use_a_real_local_service(tmp_path) -> 
         with pytest.raises(ValueError, match="Unknown method: TRACE"):
             api_request("TRACE", "items", token, base_url=base_url)
         state = ProjectState(bundle_id="com.example.reader", current_version="2.0")
+        assert (
+            wait_for_build_processing(
+                ProjectState(bundle_id="com.example.reader", current_build=7),
+                max_wait_minutes=2,
+                base_url=base_url,
+            )
+            is True
+        )
         return submit_for_review(tmp_path, state, base_url)
 
     result, received = run_local_review(exercise)
@@ -121,7 +131,6 @@ def test_submit_transport_and_review_flow_use_a_real_local_service(tmp_path) -> 
     assert ("POST", "/reviewSubmissions") in received
     assert ("POST", "/reviewSubmissionItems") in received
     assert ("PATCH", "/reviewSubmissions/submission-local") in received
-    assert wait_for_build_processing(ProjectState(), max_wait_minutes=0) is False
 
 
 def test_release_tag_is_created_in_a_real_local_git_repository(tmp_path) -> None:

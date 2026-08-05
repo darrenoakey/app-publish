@@ -1,6 +1,7 @@
 import sys
 
 from utils import (
+    SECRET_FILE_ARGUMENT,
     cprint,
     dir_exists,
     ensure_dir,
@@ -28,6 +29,7 @@ from utils import (
     write_file,
     xcode_archive,
     xcode_build,
+    secret_file_argument,
 )
 
 
@@ -40,6 +42,31 @@ def test_process_filesystem_and_scheme_boundaries(tmp_path) -> None:
     schemes = parse_schemes(listed)
     assert schemes == ["Helper", "My App UI Tests", "My App"]
     assert pick_scheme(schemes, "My-App") == "My App"
+
+
+def test_process_secret_file_stays_in_memory() -> None:
+    code, output = run(
+        [
+            sys.executable,
+            "-c",
+            "import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text())",
+            SECRET_FILE_ARGUMENT,
+        ],
+        secret_file="process-only-test-value",
+    )
+    assert (code, output) == (0, "process-only-test-value")
+
+    code, output = run(
+        [
+            sys.executable,
+            "-c",
+            "import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text() + pathlib.Path(sys.argv[2]).read_text())",
+            secret_file_argument(0),
+            secret_file_argument(1),
+        ],
+        secret_files=("first-", "second"),
+    )
+    assert (code, output) == (0, "first-second")
 
 
 def test_console_file_and_failure_boundaries(tmp_path, capsys) -> None:

@@ -19,7 +19,7 @@ def test_secret_update_plan_trims_new_values_and_preserves_existing_values() -> 
     assert plan_secret_update("old", "  new  ") == ("update", "new")
     assert plan_secret_update("old", "   ") == ("retain", "old")
     assert plan_secret_update(None, "") == ("absent", None)
-    assert build_secret_prompt("Team", "ABC123") == "Team [ABC123]: "
+    assert build_secret_prompt("Team", "ABC123") == "Team [stored]: "
     assert build_secret_prompt("Team", None) == "Team: "
     assert describe_secret_action("team_id", "update") == "Updated team_id."
     assert describe_secret_action("team_id", "retain") == "Kept team_id."

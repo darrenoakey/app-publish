@@ -6,9 +6,18 @@ import os
 import sys
 import subprocess
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Optional
 from colorama import init, Fore, Style
+
+SECRET_FILE_ARGUMENT = "__APP_PUBLISH_SECRET_FILE_0__"
+
+
+def secret_file_argument(index: int) -> str:
+    """Return the nonsecret argv marker for one anonymous secret pipe."""
+    return f"__APP_PUBLISH_SECRET_FILE_{index}__"
+
 
 # initialize colorama
 init(autoreset=True)
@@ -93,19 +102,37 @@ def run(
     env: Optional[dict[str, str]] = None,
     capture: bool = True,
     timeout: Optional[int] = None,
+    secret_file: str | bytes | None = None,
+    secret_files: Sequence[str | bytes] = (),
 ) -> tuple[int, str]:
     full_env = os.environ.copy()
     if env:
         full_env.update(env)
 
+    read_descriptors: list[int] = []
+    write_descriptors: list[int] = []
+    actual_cmd = cmd
     try:
+        values = ((secret_file,) if secret_file is not None else ()) + tuple(secret_files)
+        for index, secret_value in enumerate(values):
+            read_descriptor, write_descriptor = os.pipe()
+            read_descriptors.append(read_descriptor)
+            write_descriptors.append(write_descriptor)
+            secret_bytes = secret_value.encode("utf-8") if isinstance(secret_value, str) else secret_value
+            os.write(write_descriptor, secret_bytes)
+            os.close(write_descriptor)
+            write_descriptors.remove(write_descriptor)
+            marker = secret_file_argument(index)
+            secret_path = f"/dev/fd/{read_descriptor}"
+            actual_cmd = [argument.replace(marker, secret_path) for argument in actual_cmd]
         p = subprocess.run(
-            cmd,
+            actual_cmd,
             cwd=cwd,
             capture_output=capture,
             text=True,
             env=full_env,
             timeout=timeout,
+            pass_fds=tuple(read_descriptors),
         )
         output = p.stdout.strip() if p.stdout else ""
         if p.stderr and p.stderr.strip():
@@ -115,6 +142,11 @@ def run(
         return 1, "Command timed out"
     except Exception as e:
         return 1, str(e)
+    finally:
+        for descriptor in write_descriptors:
+            os.close(descriptor)
+        for descriptor in read_descriptors:
+            os.close(descriptor)
 
 
 # ##################################################################

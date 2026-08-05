@@ -11,7 +11,6 @@ from modules.appstore import (
     check_app_exists_api,
     create_jwt_token,
     creation_instructions,
-    ensure_create_app_lane,
     get_headers,
     open_app_store_connect_and_show_instructions,
     parse_apps_response,
@@ -64,29 +63,6 @@ def test_appstore_headers_contain_locally_signed_token() -> None:
     headers = get_headers()
     assert headers["Authorization"].startswith("Bearer ")
     assert headers["Content-Type"] == "application/json"
-
-
-def test_create_app_lane_is_written_once_to_a_real_fastfile(tmp_path) -> None:
-    state = ProjectState(bundle_id="com.example.reader", app_name="Reader")
-    assert ensure_create_app_lane(tmp_path, state) is False
-    fastlane = tmp_path / "fastlane"
-    fastlane.mkdir()
-    fastfile = fastlane / "Fastfile"
-    fastfile.write_text("platform :ios do\nend\n")
-    assert ensure_create_app_lane(tmp_path, state) is True
-    content = fastfile.read_text()
-    assert "lane :create_app" in content
-    assert 'bundle_id = "com.example.reader"' in content
-    assert 'app_name = "Reader"' in content
-    assert ensure_create_app_lane(tmp_path, state) is True
-    assert fastfile.read_text() == content
-
-    without_end = tmp_path / "without-end"
-    (without_end / "fastlane").mkdir(parents=True)
-    second_fastfile = without_end / "fastlane" / "Fastfile"
-    second_fastfile.write_text("platform :ios\n")
-    assert ensure_create_app_lane(without_end, state) is True
-    assert "lane :create_app" in second_fastfile.read_text()
 
 
 def test_appstore_validation_stops_before_external_actions(tmp_path, capsys) -> None:

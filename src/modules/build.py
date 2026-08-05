@@ -5,7 +5,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState, load_state, save_state
-from config import TEAM_ID, API_KEY_ID, API_ISSUER_ID, API_KEY_PATH
+from config import TEAM_ID
+from modules.signing import sign_app_bundle
 from utils import (
     print_info,
     print_success,
@@ -15,7 +16,6 @@ from utils import (
     ensure_dir,
     file_exists,
     dir_exists,
-    write_file,
     parse_schemes,
     pick_scheme,
 )
@@ -124,43 +124,6 @@ def find_scheme(project_path: Path, state: ProjectState) -> str:
 
 
 # ##################################################################
-# create export options
-# create exportoptions.plist for app store export
-def create_export_options(project_path: Path, state: ProjectState) -> Path:
-    export_options = project_path / "ExportOptions.plist"
-
-    # use 'app-store' method (not 'app-store-connect') to just create the ipa
-    # without requiring app store connect authentication at build time
-    # Automatic signing — Xcode/xcodebuild uses the ASC API key (passed via
-    # -authenticationKey* on the exportArchive call) to fetch or create the
-    # appstore provisioning profile on the fly. NO fastlane match.
-    content = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>method</key>
-    <string>app-store</string>
-    <key>teamID</key>
-    <string>{TEAM_ID}</string>
-    <key>uploadSymbols</key>
-    <true/>
-    <key>signingStyle</key>
-    <string>automatic</string>
-    <key>destination</key>
-    <string>export</string>
-</dict>
-</plist>
-"""
-    write_file(export_options, content)
-    return export_options
-
-
-# ##################################################################
-# create export options
-# create exportoptions.plist for app store export
-
-
-# ##################################################################
 # build archive
 # build and archive the app
 def build_archive(project_path: Path, state: ProjectState) -> bool:
@@ -202,17 +165,8 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
     else:
         archive_cmd.extend(["-project", xcode_project])
 
-    # Automatic signing + ASC API key — Xcode resolves the appstore
-    # provisioning profile via the developer portal at archive time.
-    # NO fastlane match. Ever.
-    auth_args = [
-        "-authenticationKeyID",
-        API_KEY_ID or "",
-        "-authenticationKeyIssuerID",
-        API_ISSUER_ID or "",
-        "-authenticationKeyPath",
-        str(API_KEY_PATH),
-    ]
+    # Build unsigned. The finished bundle is provisioned and signed below by
+    # rcodesign with the P12 supplied through an anonymous pipe.
     archive_cmd.extend(
         [
             "-scheme",
@@ -223,13 +177,12 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
             str(archive_path),
             "-destination",
             "generic/platform=iOS",
-            "-allowProvisioningUpdates",
-            *auth_args,
             "CURRENT_PROJECT_VERSION=" + str(state.current_build),
             f"MARKETING_VERSION={state.current_version}",
             f"DEVELOPMENT_TEAM={TEAM_ID}",
             f"PRODUCT_BUNDLE_IDENTIFIER={state.bundle_id}",
-            "CODE_SIGN_STYLE=Automatic",
+            "CODE_SIGNING_ALLOWED=NO",
+            "CODE_SIGNING_REQUIRED=NO",
             "archive",
         ]
     )
@@ -247,57 +200,27 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
     print_success(f"Archive created: {archive_path}")
     state.metadata["archive_path"] = str(archive_path)
 
-    # export ipa - try multiple methods
+    applications = archive_path / "Products" / "Applications"
+    app_bundles = list(applications.glob("*.app"))
+    if len(app_bundles) != 1:
+        print_error(f"Expected one app bundle in archive, found {len(app_bundles)}")
+        return False
+    app_name = state.metadata.get("app_name") or state.project_name
+    if not sign_app_bundle(
+        app_bundles[0],
+        state.bundle_id,
+        app_name,
+        "IOS_APP_STORE",
+    ):
+        return False
+
+    # Package the already signed bundle directly. xcodebuild -exportArchive
+    # would route signing back through macOS Keychain.
     export_path = build_dir / "export"
     ensure_dir(export_path)
-
-    ipa_path = None
-    export_succeeded = False
-
-    # Export via xcodebuild -exportArchive with automatic signing + ASC API
-    # auth. Xcode fetches/creates the appstore provisioning profile inline.
-    # NO fastlane match. NO fastlane gym.
-    print_info("Exporting IPA via xcodebuild (automatic signing, ASC API)...")
-    export_options = create_export_options(project_path, state)
-
-    ret_code, output = exec_cmd(
-        [
-            "xcodebuild",
-            "-exportArchive",
-            "-archivePath",
-            str(archive_path),
-            "-exportPath",
-            str(export_path),
-            "-exportOptionsPlist",
-            str(export_options),
-            "-allowProvisioningUpdates",
-            "-authenticationKeyID",
-            API_KEY_ID or "",
-            "-authenticationKeyIssuerID",
-            API_ISSUER_ID or "",
-            "-authenticationKeyPath",
-            str(API_KEY_PATH),
-        ],
-        timeout=300,
-    )
-
-    if ret_code == 0:
-        ipa_files = list(export_path.glob("*.ipa"))
-        if ipa_files:
-            ipa_path = ipa_files[0]
-            export_succeeded = True
-    else:
-        print_warning(f"xcodebuild export failed: {output[:300]}...")
-
-    # method 3: manual ipa creation (bypasses rsync issues)
-    if not export_succeeded:
-        print_warning("Standard exports failed, creating IPA manually...")
-        ipa_path = create_ipa_manually(archive_path, export_path, state)
-        if ipa_path:
-            export_succeeded = True
-
-    if not export_succeeded or not ipa_path:
-        print_error("All IPA export methods failed")
+    ipa_path = create_ipa_manually(archive_path, export_path, state)
+    if not ipa_path:
+        print_error("IPA packaging failed")
         return False
 
     print_success(f"IPA created: {ipa_path}")

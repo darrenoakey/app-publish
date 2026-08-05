@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # setup secrets for app-publish
-# interactive cli tool to configure credentials in system keyring
+# interactive cli tool to configure credentials in daz-secrets
+import getpass
 import sys
 
-# Read/write via /usr/bin/security (see keychain.py) so secrets stay readable
-# without a GUI prompt across Homebrew Python upgrades.
-import keychain
+import secrets_store
 
 SERVICE_NAME = "app-publish"
 
@@ -15,6 +14,7 @@ SECRETS = [
     ("bundle_id_prefix", "Bundle ID Prefix (e.g., com.yourname.)"),
     ("api_key_id", "App Store Connect API Key ID"),
     ("api_issuer_id", "App Store Connect API Issuer ID"),
+    ("api_private_key", "App Store Connect API Private Key (PEM)"),
     ("github_user", "GitHub Username"),
     ("contact_first_name", "Contact First Name"),
     ("contact_last_name", "Contact Last Name"),
@@ -42,7 +42,7 @@ def plan_secret_update(current_value: str | None, entered_value: str) -> tuple[s
 # build secret prompt
 # show the current value only when one is already stored
 def build_secret_prompt(description: str, current_value: str | None) -> str:
-    current = f" [{current_value}]" if current_value else ""
+    current = " [stored]" if current_value else ""
     return f"{description}{current}: "
 
 
@@ -59,24 +59,24 @@ def describe_secret_action(key: str, action: str) -> str:
 
 # ##################################################################
 # main
-# interactive loop to prompt for and store each secret in keyring
+# interactive loop to prompt for and store each secret in daz-secrets
 def main() -> int:
     print(f"Setting up secrets for service: {SERVICE_NAME}")
     print("Press Enter to keep existing value (if shown in brackets).")
     print("-" * 50)
 
     for key, description in SECRETS:
-        current_val = keychain.get_password(SERVICE_NAME, key)
+        current_val = secrets_store.get_secret(SERVICE_NAME, key)
         prompt = build_secret_prompt(description, current_val)
 
-        action, value = plan_secret_update(current_val, input(prompt))
+        action, value = plan_secret_update(current_val, getpass.getpass(prompt))
 
         if action == "update":
-            keychain.set_password(SERVICE_NAME, key, value)
+            secrets_store.set_secret(SERVICE_NAME, key, value)
         print(describe_secret_action(key, action))
 
     print("-" * 50)
-    print("Setup complete. Values stored in system keyring.")
+    print("Setup complete. Values stored through daz-secrets.")
     return 0
 
 

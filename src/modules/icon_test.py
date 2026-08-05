@@ -1,4 +1,4 @@
-import base64
+import hashlib
 import importlib
 import json
 from pathlib import Path
@@ -9,10 +9,10 @@ import modules.icon as icon_module
 from config import ICON_SIZES_IOS
 from modules.icon import (
     GENERATE_IMAGE_CLI,
-    ICON_OPERATION_STATE,
     check_existing_icons,
     generate_icon_prompt,
     generate_master_icon,
+    icon_cache_path,
     is_valid_master_icon,
     resize_icons,
     run,
@@ -30,7 +30,6 @@ def test_generate_master_icon_via_durable_codex_queue() -> None:
     project_path = Path(__file__).resolve().parents[2] / "output" / "testing" / "icon-canary"
     project_path.mkdir(parents=True, exist_ok=True)
     master_icon = project_path / "assets" / "icon-1024.png"
-    operation_state = project_path / "assets" / ICON_OPERATION_STATE
     if master_icon.exists():
         master_icon.unlink()
 
@@ -47,34 +46,16 @@ def test_generate_master_icon_via_durable_codex_queue() -> None:
         image.load()
         assert image.format == "PNG"
         assert image.size == (1024, 1024)
-
-    durable_state = json.loads(operation_state.read_text(encoding="utf-8"))
-    payload = json.loads(base64.b64decode(durable_state["payload_base64"]))
-    first_identity = (durable_state["idempotency_key"], durable_state["job_id"])
+    first_digest = hashlib.sha256(master_icon.read_bytes()).hexdigest()
+    cached_icon = icon_cache_path(generate_icon_prompt(state))
+    assert is_valid_master_icon(cached_icon)
     assert GENERATE_IMAGE_CLI == "/Users/darrenoakey/bin/generate_image"
-    assert [path.name for path in operation_state.parent.glob("*.image-job.json")] == [ICON_OPERATION_STATE]
-    assert not list(operation_state.parent.glob("*.igs-submission.json"))
-    assert operation_state.stat().st_mode & 0o777 == 0o600
-    assert durable_state["version"] == 1
-    assert durable_state["service_url"] == "http://10.0.0.46:8830"
-    assert durable_state["submit_path"] == "/jobs"
-    assert payload == {
-        "height": 1024,
-        "prompt": generate_icon_prompt(state),
-        "transparent": False,
-        "width": 1024,
-    }
-    assert all(first_identity)
 
     master_icon.unlink()
     recovered = generate_master_icon(project_path, state)
-    recovered_state = json.loads(operation_state.read_text(encoding="utf-8"))
 
     assert recovered == master_icon
-    assert (
-        recovered_state["idempotency_key"],
-        recovered_state["job_id"],
-    ) == first_identity
+    assert hashlib.sha256(master_icon.read_bytes()).hexdigest() == first_digest
     with Image.open(master_icon) as image:
         image.load()
         assert image.format == "PNG"

@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import hashlib
 
-from config import PIPELINE_STEPS, OPTIONAL_STEPS
+from config import PIPELINE_STEPS, OPTIONAL_STEPS, validate_secrets
 from state import load_state, save_state, reset_state, ProjectState
 from utils import (
     print_header,
@@ -306,6 +306,8 @@ Examples:
             print()
             print_warning(f"Last error: {state.last_error}")
         return 0
+
+    validate_secrets()
 
     # single step mode
     if args.step:

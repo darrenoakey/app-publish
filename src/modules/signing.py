@@ -1,133 +1,195 @@
-# Signing for app-publish.
-#
-# WE NEVER USE FASTLANE MATCH. Match's encrypted-git-repo model is fragile
-# (MATCH_PASSWORD lives in someone's head, machine-to-machine sync is a
-# nightmare) and offers nothing over Xcode's built-in automatic signing
-# when paired with an App Store Connect API key.
-#
-# Strategy:
-#   1. Verify a distribution cert exists locally (security find-identity).
-#      If not, create one via the App Store Connect API and import the
-#      resulting .p12 into the login keychain.
-#   2. Ensure the Bundle ID exists on the developer portal (idempotent).
-#   3. That's it. Profile creation is handled by xcodebuild itself at
-#      archive/export time via `-allowProvisioningUpdates` + the API key.
-from pathlib import Path
+"""Provision and apply Apple signatures without using macOS Keychain."""
 
+from pathlib import Path
+import plistlib
+import shutil
+import subprocess
 import sys
+
+from cryptography.hazmat.primitives import serialization
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import apple_portal
 from state import ProjectState
-from config import TEAM_ID, API_KEY_PATH, API_KEY_ID, API_ISSUER_ID
 from utils import (
-    print_info,
-    print_success,
-    print_warning,
     print_error,
+    print_success,
     run as exec_cmd,
+    secret_file_argument,
 )
 
 
-# ##################################################################
-# has distribution cert
-# True if a usable "Apple Distribution" identity is in the login keychain.
-def has_distribution_cert(security_binary: str = "security") -> bool:
-    ret_code, output = exec_cmd([security_binary, "find-identity", "-v", "-p", "codesigning"])
-    if ret_code != 0:
+def has_distribution_cert() -> bool:
+    """Report whether the encrypted provider contains a usable remote identity."""
+    value = apple_portal.secrets_store.get_secret_bytes(apple_portal.SERVICE, apple_portal.P12_ACCOUNT)
+    if not value:
         return False
-    return "Apple Distribution" in output
+    try:
+        _, certificate = apple_portal._load_p12(value)
+        return apple_portal._remote_certificate_id(certificate) is not None
+    except apple_portal.ApplePortalError:
+        return False
 
 
-# ##################################################################
-# ensure bundle id
-# Ensure the bundle id exists on the developer portal. Idempotent.
-def ensure_bundle_id(bundle_id: str, app_name: str, ruby_binary: str = "ruby") -> bool:
-    # Use a small inline spaceship call via the `ruby` binary that ships
-    # with fastlane — avoids pulling in a Python ASC client just for one
-    # idempotent operation.
-    print_info(f"Ensuring Bundle ID {bundle_id} on developer portal...")
-    ret_code, output = exec_cmd(
-        [
-            ruby_binary,
-            "-rspaceship",
-            "-e",
-            f"""
-        token = Spaceship::ConnectAPI::Token.create(
-          key_id: "{API_KEY_ID}",
-          issuer_id: "{API_ISSUER_ID}",
-          filepath: "{API_KEY_PATH}",
-          in_house: false
-        )
-        Spaceship::ConnectAPI.token = token
-        existing = Spaceship::ConnectAPI::BundleId.all.find {{ |b| b.identifier == "{bundle_id}" }}
-        if existing
-          puts "EXISTS"
-        else
-          Spaceship::ConnectAPI::BundleId.create(
-            name: "{app_name}",
-            identifier: "{bundle_id}",
-            platform: Spaceship::ConnectAPI::BundleIdPlatform::IOS
-          )
-          puts "CREATED"
-        end
-        """,
-        ]
-    )
-    if ret_code != 0:
-        print_error(f"Bundle ID check failed: {output}")
+def ensure_bundle_id(bundle_id: str, app_name: str) -> bool:
+    try:
+        apple_portal.ensure_bundle_id(bundle_id, app_name)
+    except apple_portal.ApplePortalError as error:
+        print_error(f"Bundle ID check failed: {error}")
         return False
-    if "CREATED" in output:
-        print_success(f"Created Bundle ID {bundle_id}")
-    else:
-        print_success(f"Bundle ID {bundle_id} already exists")
+    print_success(f"Bundle ID ready: {bundle_id}")
     return True
 
 
-# ##################################################################
-# ensure distribution cert
-# Create a distribution cert via ASC API if none exists locally.
-def ensure_distribution_cert(fastlane_binary: str = "fastlane", security_binary: str = "security") -> bool:
-    if has_distribution_cert(security_binary):
-        print_success("Distribution certificate already present")
-        return True
+def ensure_distribution_cert() -> bool:
+    try:
+        identity = apple_portal.ensure_distribution_identity()
+    except apple_portal.ApplePortalError as error:
+        print_error(f"Distribution identity setup failed: {error}")
+        return False
+    name = identity.certificate.subject.rfc4514_string()
+    print_success(f"Encrypted Apple Distribution identity ready: {name}")
+    return True
 
-    print_info("No distribution cert found locally; creating one via App Store Connect API...")
-    # fastlane's `cert` action handles the create + p12 export + keychain import.
-    # `--type appstore` ⇒ Apple Distribution. With `--api_key_path` it talks to
-    # ASC directly, no Apple-ID login, no match.
-    api_key_json = API_KEY_PATH.parent.parent / "api_key.json"
-    ret_code, output = exec_cmd(
+
+def _rcodesign_binary() -> str:
+    discovered = shutil.which("rcodesign")
+    if discovered:
+        return discovered
+    installed = Path.home() / ".cargo" / "bin" / "rcodesign"
+    if installed.is_file():
+        return str(installed)
+    raise apple_portal.ApplePortalError("rcodesign is not installed; install the apple-codesign package")
+
+
+def _profile_entitlements(profile: bytes) -> bytes:
+    decoded = subprocess.run(
         [
-            fastlane_binary,
-            "run",
-            "cert",
-            f"api_key_path:{api_key_json}",
-            "type:appstore",
-            f"team_id:{TEAM_ID}",
-            "force:false",
+            "/usr/bin/openssl",
+            "smime",
+            "-inform",
+            "der",
+            "-verify",
+            "-noverify",
         ],
-        timeout=120,
+        input=profile,
+        capture_output=True,
+        timeout=30,
+        check=False,
     )
-    if ret_code != 0:
-        print_error(f"cert action failed: {output}")
+    if decoded.returncode != 0:
+        detail = decoded.stderr.decode("utf-8", errors="replace").strip()
+        raise apple_portal.ApplePortalError(f"could not decode provisioning profile: {detail}")
+    document = plistlib.loads(decoded.stdout)
+    entitlements = document.get("Entitlements")
+    if not isinstance(entitlements, dict):
+        raise apple_portal.ApplePortalError("provisioning profile has no entitlements dictionary")
+    return plistlib.dumps(entitlements, fmt=plistlib.FMT_XML)
+
+
+def sign_app_bundle(
+    app_bundle: Path,
+    bundle_id: str,
+    app_name: str,
+    profile_type: str,
+    *,
+    device_udids: list[str] | None = None,
+) -> bool:
+    """Embed a current profile and recursively sign with an in-memory P12."""
+    try:
+        identity = apple_portal.ensure_distribution_identity()
+        bundles = [(app_bundle, bundle_id, "main")]
+        nested = sorted(
+            (
+                path
+                for path in app_bundle.rglob("*")
+                if path.is_dir() and path != app_bundle and path.suffix in {".app", ".appex"}
+            ),
+            key=lambda path: len(path.parts),
+        )
+        for bundle in nested:
+            info_path = bundle / "Info.plist"
+            if not info_path.is_file():
+                raise apple_portal.ApplePortalError(f"nested bundle has no Info.plist: {bundle}")
+            info = plistlib.loads(info_path.read_bytes())
+            nested_bundle_id = info.get("CFBundleIdentifier")
+            if not nested_bundle_id:
+                raise apple_portal.ApplePortalError(f"nested bundle has no CFBundleIdentifier: {bundle}")
+            scope = str(bundle.relative_to(app_bundle))
+            bundles.append((bundle, str(nested_bundle_id), scope))
+
+        entitlements_by_scope: list[tuple[str, bytes]] = []
+        for bundle, identifier, scope in bundles:
+            profile = apple_portal.ensure_profile(
+                identifier,
+                f"{app_name} {bundle.stem}",
+                profile_type,
+                device_udids=device_udids,
+            )
+            entitlements_by_scope.append((scope, _profile_entitlements(profile)))
+            embedded_profile = bundle / "embedded.mobileprovision"
+            embedded_profile.write_bytes(profile)
+            embedded_profile.chmod(0o644)
+
+        binary = _rcodesign_binary()
+        pem_identity = identity.private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ) + identity.certificate.public_bytes(serialization.Encoding.PEM)
+        command = [
+            binary,
+            "sign",
+            "--pem-file",
+            secret_file_argument(0),
+        ]
+        secret_values: list[bytes] = [pem_identity]
+        for scope, entitlements in entitlements_by_scope:
+            secret_values.append(entitlements)
+            command.extend(
+                [
+                    "--entitlements-xml-file",
+                    f"{scope}:{secret_file_argument(len(secret_values) - 1)}",
+                ]
+            )
+        command.append(str(app_bundle))
+        ret_code, output = exec_cmd(
+            command,
+            timeout=300,
+            secret_files=tuple(secret_values),
+        )
+        if ret_code != 0:
+            raise apple_portal.ApplePortalError(f"rcodesign failed: {output}")
+        for bundle, _, _ in bundles:
+            info_path = bundle / "Info.plist"
+            executable_root = bundle
+            if not info_path.is_file():
+                info_path = bundle / "Contents" / "Info.plist"
+                executable_root = bundle / "Contents" / "MacOS"
+            info = plistlib.loads(info_path.read_bytes())
+            executable_name = info.get("CFBundleExecutable")
+            if not executable_name:
+                raise apple_portal.ApplePortalError(f"bundle has no CFBundleExecutable: {bundle}")
+            ret_code, output = exec_cmd(
+                [binary, "verify", str(executable_root / str(executable_name))],
+                timeout=120,
+            )
+            if ret_code != 0:
+                raise apple_portal.ApplePortalError(f"rcodesign verification failed: {output}")
+    except (apple_portal.ApplePortalError, OSError, subprocess.SubprocessError) as error:
+        print_error(f"Signing failed: {error}")
         return False
-    if not has_distribution_cert(security_binary):
-        print_error("cert action returned 0 but no distribution cert appeared in keychain")
-        return False
-    print_success("Distribution certificate created and installed")
+    print_success(f"Signed {app_bundle.name} without macOS Keychain")
     return True
 
 
-# ##################################################################
-# run
-# Signing step: ensure bundle id + distribution cert. No match.
 def run(project_path: Path, state: ProjectState) -> bool:
+    del project_path
     app_name = state.metadata.get("app_name") or state.project_name
     if not ensure_bundle_id(state.bundle_id, app_name):
         return False
     if not ensure_distribution_cert():
-        print_warning("Distribution cert missing — archive will fail")
         return False
     state.metadata["signing_configured"] = True
     return True
