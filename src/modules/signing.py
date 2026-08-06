@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives import serialization
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import apple_portal
+from config import TEAM_ID
 from state import ProjectState
 from utils import (
     print_error,
@@ -147,12 +148,18 @@ def sign_app_bundle(
         secret_values: list[bytes] = [pem_identity]
         for scope, entitlements in entitlements_by_scope:
             secret_values.append(entitlements)
-            command.extend(
-                [
-                    "--entitlements-xml-file",
-                    f"{scope}:{secret_file_argument(len(secret_values) - 1)}",
-                ]
+            # rcodesign scoped form is `<scope>:<path>`. The token `main` is a
+            # reserved scope name ONLY when it is the entire value (no colon).
+            # `main:/path` is parsed as a path-scoped setting for a file named
+            # "main", so the main bundle gets no entitlements and iOS install
+            # fails with "missing the application-identifier entitlement".
+            # Use unscoped for the main bundle; keep path scope for nested ones.
+            entitlements_arg = (
+                secret_file_argument(len(secret_values) - 1)
+                if scope == "main"
+                else f"{scope}:{secret_file_argument(len(secret_values) - 1)}"
             )
+            command.extend(["--entitlements-xml-file", entitlements_arg])
         command.append(str(app_bundle))
         ret_code, output = exec_cmd(
             command,
@@ -161,6 +168,28 @@ def sign_app_bundle(
         )
         if ret_code != 0:
             raise apple_portal.ApplePortalError(f"rcodesign failed: {output}")
+        # Fail closed if the main bundle lost application-identifier (the
+        # classic symptom of a broken rcodesign entitlements scope).
+        # codesign prints "Executable=..." on stderr; exec_cmd merges streams,
+        # so slice strictly from <?xml through </plist>.
+        ret_code, output = exec_cmd(
+            ["codesign", "-d", "--entitlements", ":-", "--xml", str(app_bundle)],
+            timeout=60,
+        )
+        if ret_code != 0:
+            raise apple_portal.ApplePortalError(f"codesign entitlements dump failed: {output}")
+        xml_start = output.find("<?xml")
+        xml_end = output.rfind("</plist>")
+        if xml_start < 0 or xml_end < 0:
+            raise apple_portal.ApplePortalError(
+                f"codesign entitlements not parseable: {output[:200]}"
+            )
+        dumped = plistlib.loads(output[xml_start : xml_end + len("</plist>")].encode())
+        app_id = dumped.get("application-identifier") if isinstance(dumped, dict) else None
+        if not app_id or not str(app_id).startswith(f"{TEAM_ID}."):
+            raise apple_portal.ApplePortalError(
+                "signed app is missing application-identifier entitlement"
+            )
         for bundle, _, _ in bundles:
             info_path = bundle / "Info.plist"
             executable_root = bundle

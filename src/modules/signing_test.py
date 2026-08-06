@@ -2,8 +2,10 @@
 
 import plistlib
 import shutil
+import subprocess
 
 import apple_portal
+from config import TEAM_ID
 from modules.signing import (
     ensure_bundle_id,
     ensure_distribution_cert,
@@ -46,6 +48,16 @@ def test_real_bundle_is_profiled_and_signed_without_keychain(tmp_path) -> None:
     assert ensure_distribution_cert()
     assert sign_app_bundle(app, bundle_id, "OL Bridge", "IOS_APP_STORE")
     assert (app / "embedded.mobileprovision").is_file()
+
+    # Regression: rcodesign `main:<path>` scope drops entitlements; the main
+    # bundle must carry application-identifier or device install rejects it.
+    dumped = subprocess.check_output(
+        ["codesign", "-d", "--entitlements", ":-", "--xml", str(app)],
+        stderr=subprocess.DEVNULL,
+    )
+    ents = plistlib.loads(dumped)
+    assert ents.get("application-identifier") == f"{TEAM_ID}.{bundle_id}"
+    assert ents.get("com.apple.developer.team-identifier") == TEAM_ID
 
     state = ProjectState(bundle_id=bundle_id, project_name="OL Bridge")
     assert run(tmp_path, state)
