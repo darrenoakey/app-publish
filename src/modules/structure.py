@@ -63,21 +63,40 @@ def setup_web_project(project_path: Path, state: ProjectState) -> bool:
     else:
         print_info("Capacitor already installed")
 
-    # Always update capacitor.config.json to ensure bundle ID is correct
-    print_info("Updating Capacitor configuration...")
-    app_name = state.app_name or state.project_name
-
     # Determine web directory (where index.html is)
     # Capacitor requires webDir to be a subdirectory, not "."
+    print_info("Resolving Capacitor web directory...")
+    app_name = state.app_name or state.project_name
+    existing_cap: dict = {}
+    capacitor_config_path = project_path / "capacitor.config.json"
+    if file_exists(capacitor_config_path):
+        try:
+            import json
+
+            loaded = json.loads(capacitor_config_path.read_text())
+            if isinstance(loaded, dict):
+                existing_cap = loaded
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            existing_cap = {}
+
+    if not state.app_name:
+        existing_name = existing_cap.get("appName")
+        if isinstance(existing_name, str) and existing_name.strip():
+            state.app_name = existing_name.strip()
+            app_name = state.app_name
+
     web_dir = None
-    if file_exists(project_path / "dist" / "index.html"):
-        web_dir = "dist"
-    elif file_exists(project_path / "build" / "index.html"):
-        web_dir = "build"
-    elif file_exists(project_path / "www" / "index.html"):
-        web_dir = "www"
-    elif file_exists(project_path / "public" / "index.html"):
-        web_dir = "public"
+    configured_web_dir = existing_cap.get("webDir")
+    if isinstance(configured_web_dir, str) and configured_web_dir.strip():
+        candidate = configured_web_dir.strip().strip("/")
+        if candidate and file_exists(project_path / candidate / "index.html"):
+            web_dir = candidate
+
+    if web_dir is None:
+        for candidate in ("web", "www", "dist", "build", "public", "sudoku"):
+            if file_exists(project_path / candidate / "index.html"):
+                web_dir = candidate
+                break
 
     # If index.html is in root, create www directory and MOVE web files
     if web_dir is None and file_exists(project_path / "index.html"):
@@ -117,6 +136,7 @@ def setup_web_project(project_path: Path, state: ProjectState) -> bool:
                 "build",
                 "assets",
                 "scripts",
+                "tests",
             }:
                 # Check if directory contains web assets
                 if any(sub.suffix.lower() in web_extensions for sub in f.rglob("*") if sub.is_file()):
@@ -138,21 +158,22 @@ def setup_web_project(project_path: Path, state: ProjectState) -> bool:
         print_error("No index.html found in project")
         return False
 
-    # Create/update capacitor.config.json with correct bundle ID
-    capacitor_config_content = f'''{{
-  "appId": "{state.bundle_id}",
-  "appName": "{app_name}",
-  "webDir": "{web_dir}",
-  "server": {{
-    "androidScheme": "https"
-  }},
-  "ios": {{
-    "path": "ios"
-  }}
-}}
-'''
-    write_file(project_path / "capacitor.config.json", capacitor_config_content)
-    print_success("Capacitor configured")
+    # Create/update capacitor.config.json while preserving existing plugin settings
+    print_info("Updating Capacitor configuration...")
+    capacitor_config = {
+        "appId": state.bundle_id or existing_cap.get("appId") or "",
+        "appName": app_name,
+        "webDir": web_dir,
+        "server": existing_cap.get("server") if isinstance(existing_cap.get("server"), dict) else {"androidScheme": "https"},
+        "ios": existing_cap.get("ios") if isinstance(existing_cap.get("ios"), dict) else {"path": "ios"},
+    }
+    if isinstance(existing_cap.get("plugins"), dict):
+        capacitor_config["plugins"] = existing_cap["plugins"]
+
+    import json
+
+    write_file(project_path / "capacitor.config.json", json.dumps(capacitor_config, indent=2) + "\n")
+    print_success(f"Capacitor configured (webDir={web_dir})")
 
     # Add iOS platform if not present
     ios_dir = project_path / "ios"
@@ -179,11 +200,19 @@ def setup_web_project(project_path: Path, state: ProjectState) -> bool:
         print_warning(f"Capacitor sync warning: {output}")
         # Don't fail on sync warnings
 
-    # Update Xcode project settings
-    ios_project = list(ios_dir.glob("*.xcodeproj"))
-    if ios_project:
-        state.metadata["xcode_project"] = str(ios_project[0])
-        print_success(f"Xcode project: {ios_project[0].name}")
+    # Update Xcode project settings - Capacitor nests under ios/App/
+    from modules.detect import detect_existing_ios_project
+
+    ios_project = detect_existing_ios_project(project_path)
+    if ios_project is None:
+        nested = sorted(ios_dir.rglob("*.xcodeproj")) if dir_exists(ios_dir) else []
+        ios_project = nested[0] if nested else None
+    if ios_project is not None:
+        state.metadata["xcode_project"] = str(ios_project)
+        state.metadata["has_existing_ios"] = True
+        print_success(f"Xcode project: {ios_project}")
+    else:
+        print_warning("No Xcode project found under ios/ after Capacitor setup")
 
     return True
 

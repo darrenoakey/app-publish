@@ -42,6 +42,37 @@ def test_structure_rejects_incomplete_projects_using_real_directories(tmp_path, 
     assert run(swift, ProjectState(project_type="unknown")) is False
 
 
+def test_structure_keeps_existing_capacitor_web_layout(tmp_path) -> None:
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "index.html").write_text("<main>felt</main>")
+    (tmp_path / "package.json").write_text('{"name":"ol-golf"}')
+    (tmp_path / "node_modules" / "@capacitor").mkdir(parents=True)
+    (tmp_path / "capacitor.config.json").write_text(
+        '{"appId":"com.darrenoakey.olGolf","appName":"OL Golf","webDir":"web",'
+        '"plugins":{"StatusBar":{"overlaysWebView":false}}}'
+    )
+    xcode = tmp_path / "ios" / "App" / "App.xcodeproj"
+    xcode.mkdir(parents=True)
+    (xcode / "project.pbxproj").write_text(
+        "PRODUCT_BUNDLE_IDENTIFIER = com.darrenoakey.olGolf;\n"
+    )
+
+    state = ProjectState(
+        project_type="web",
+        project_name="ol-golf",
+        bundle_id="com.darrenoakey.olGolf",
+    )
+    assert setup_web_project(tmp_path, state) is True
+    assert state.app_name == "OL Golf"
+    assert state.metadata["xcode_project"] == str(xcode)
+    assert (tmp_path / "web" / "index.html").is_file()
+    config = (tmp_path / "capacitor.config.json").read_text()
+    assert '"webDir": "web"' in config
+    assert '"appId": "com.darrenoakey.olGolf"' in config
+    assert "StatusBar" in config
+
+
+
 def test_structure_preserves_existing_local_automation_files(tmp_path) -> None:
     fastlane = tmp_path / "fastlane"
     fastlane.mkdir()

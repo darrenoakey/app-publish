@@ -85,6 +85,32 @@ def test_ios_project_bundle_and_run_state_are_derived_from_real_files(tmp_path) 
     assert web_state.metadata["needs_build"] is True
 
 
+def test_capacitor_layout_detects_nested_xcode_and_config_identity(tmp_path) -> None:
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "index.html").write_text("<main>golf</main>")
+    (tmp_path / "package.json").write_text("{}")
+    (tmp_path / "capacitor.config.json").write_text(
+        '{"appId":"com.darrenoakey.olGolf","appName":"OL Golf","webDir":"web"}'
+    )
+    xcode = tmp_path / "ios" / "App" / "App.xcodeproj"
+    xcode.mkdir(parents=True)
+    (xcode / "project.pbxproj").write_text(
+        "PRODUCT_BUNDLE_IDENTIFIER = com.darrenoakey.olGolf;\n"
+    )
+
+    assert detect_existing_ios_project(tmp_path) == xcode
+    assert detect_bundle_id(tmp_path) == "com.darrenoakey.olGolf"
+
+    state = ProjectState()
+    assert run(tmp_path, state) is True
+    assert state.project_type == "web"
+    assert state.bundle_id == "com.darrenoakey.olGolf"
+    assert state.app_name == "OL Golf"
+    assert state.metadata["has_existing_ios"] is True
+    assert state.metadata["xcode_project"] == str(xcode)
+    assert state.metadata["entry_point"] == "web/index.html"
+
+
 def test_bundle_identifier_generation_handles_letters_numbers_and_symbols() -> None:
     assert generate_bundle_id("Reader").endswith("reader")
     assert generate_bundle_id("123").endswith("app123")

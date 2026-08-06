@@ -59,17 +59,22 @@ def detect_existing_ios_project(project_path: Path) -> Path | None:
     # ##################################################################
     # detect existing ios project
     # check if there's already an ios/xcode project
-    # Look for .xcodeproj
-    xcodeproj = list(project_path.glob("*.xcodeproj"))
+    # Look for .xcodeproj at the project root first
+    xcodeproj = sorted(project_path.glob("*.xcodeproj"))
     if xcodeproj:
         return xcodeproj[0]
 
-    # Look in ios/ subdirectory (common for web-wrapped apps)
+    # Capacitor default layout: ios/App/App.xcodeproj
+    capacitor_project = project_path / "ios" / "App" / "App.xcodeproj"
+    if dir_exists(capacitor_project):
+        return capacitor_project
+
+    # Look under ios/ for any nested .xcodeproj (Capacitor and similar wrappers)
     ios_dir = project_path / "ios"
     if dir_exists(ios_dir):
-        xcodeproj = list(ios_dir.glob("*.xcodeproj"))
-        if xcodeproj:
-            return xcodeproj[0]
+        nested = sorted(ios_dir.rglob("*.xcodeproj"))
+        if nested:
+            return nested[0]
 
     return None
 
@@ -77,7 +82,19 @@ def detect_existing_ios_project(project_path: Path) -> Path | None:
 def detect_bundle_id(project_path: Path) -> str | None:
     # ##################################################################
     # detect bundle id
-    # try to detect existing bundle id from project
+    # try capacitor.config.json first, then existing Xcode project settings
+    capacitor_config = project_path / "capacitor.config.json"
+    if file_exists(capacitor_config):
+        try:
+            import json
+
+            data = json.loads(capacitor_config.read_text())
+            app_id = data.get("appId")
+            if isinstance(app_id, str) and app_id.strip():
+                return app_id.strip()
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+
     xcodeproj = detect_existing_ios_project(project_path)
     if not xcodeproj:
         return None
@@ -112,6 +129,7 @@ def generate_bundle_id(project_name: str) -> str:
     if sanitized and not sanitized[0].isalpha():
         sanitized = "app" + sanitized
     return f"{BUNDLE_ID_PREFIX}{sanitized}"
+
 
 
 def run(project_path: Path, state: ProjectState) -> bool:
@@ -156,11 +174,30 @@ def run(project_path: Path, state: ProjectState) -> bool:
     if project_type == "web":
         if file_exists(project_path / "index.html"):
             state.metadata["entry_point"] = "index.html"
+        elif file_exists(project_path / "web" / "index.html"):
+            state.metadata["entry_point"] = "web/index.html"
+        elif file_exists(project_path / "www" / "index.html"):
+            state.metadata["entry_point"] = "www/index.html"
         elif file_exists(project_path / "src" / "index.html"):
             state.metadata["entry_point"] = "src/index.html"
         elif file_exists(project_path / "dist" / "index.html"):
             state.metadata["entry_point"] = "dist/index.html"
             state.metadata["needs_build"] = True
+        elif file_exists(project_path / "public" / "index.html"):
+            state.metadata["entry_point"] = "public/index.html"
+
+        # Prefer an existing Capacitor display name when identity has not set one yet
+        if not state.app_name and file_exists(project_path / "capacitor.config.json"):
+            try:
+                import json
+
+                cap = json.loads((project_path / "capacitor.config.json").read_text())
+                app_name = cap.get("appName")
+                if isinstance(app_name, str) and app_name.strip():
+                    state.app_name = app_name.strip()
+                    print_info(f"Using Capacitor app name: {state.app_name}")
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                pass
 
         if "entry_point" in state.metadata:
             print_info(f"Web entry point: {state.metadata['entry_point']}")
