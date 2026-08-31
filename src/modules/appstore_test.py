@@ -1,10 +1,11 @@
 import importlib
 import json
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import jwt
-
+import psycopg2
 import modules.appstore as appstore_module
 from config import API_KEY_ID
 from modules.appstore import (
@@ -17,7 +18,7 @@ from modules.appstore import (
     parse_fastlane_result,
     run,
 )
-from notices import RecordedNoticeStore
+from notices import PostgresNoticeStore, TEST_NOTICE_DSN
 from session import IrisClient, ListedCookieSource
 from state import ProjectState
 
@@ -135,13 +136,11 @@ def test_run_creates_missing_app_via_iris_session(tmp_path) -> None:
             base_url=f"http://127.0.0.1:{iris_server.server_address[1]}/",
         )
         state = ProjectState(app_name="Reader", bundle_id="com.example.reader", current_version="1.0")
-        notices = RecordedNoticeStore()
         ok = run(
             tmp_path,
             state,
             base_url=f"http://127.0.0.1:{jwt_server.server_address[1]}",
             iris=iris,
-            notices=notices,
         )
     finally:
         jwt_server.shutdown()
@@ -164,8 +163,9 @@ def test_run_notifies_when_iris_create_is_forbidden(tmp_path) -> None:
     IrisCreateHandler.posts = []
     jwt_server, jwt_thread = serve(LocalAppsHandler)
     iris_server, iris_thread = serve(IrisCreateHandler)
-    notices = RecordedNoticeStore()
-    state = ProjectState(app_name="Reader", bundle_id="com.example.reader")
+    bundle_id = f"com.example.reader.{uuid.uuid4().hex}"
+    key = f"session-create:{bundle_id}"
+    state = ProjectState(app_name="Reader", bundle_id=bundle_id)
     try:
         iris = IrisClient(
             ListedCookieSource([{"name": "myacinfo", "value": "abc"}]),
@@ -176,7 +176,7 @@ def test_run_notifies_when_iris_create_is_forbidden(tmp_path) -> None:
             state,
             base_url=f"http://127.0.0.1:{jwt_server.server_address[1]}",
             iris=iris,
-            notices=notices,
+            notices=PostgresNoticeStore(TEST_NOTICE_DSN),
         )
     finally:
         jwt_server.shutdown()
@@ -185,9 +185,18 @@ def test_run_notifies_when_iris_create_is_forbidden(tmp_path) -> None:
         iris_server.server_close()
         jwt_thread.join()
         iris_thread.join()
+    with psycopg2.connect(TEST_NOTICE_DSN) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT source, message FROM waggler_notifications WHERE idempotency_key = %s",
+                (key,),
+            )
+            rows = cursor.fetchall()
+            cursor.execute("DELETE FROM waggler_notifications WHERE idempotency_key = %s", (key,))
+        connection.commit()
     assert ok is False
-    assert notices.rows[0][0] == "app-publish"
-    assert "Chrome session expired" in notices.rows[0][2]
+    assert rows[0][0] == "app-publish"
+    assert "Chrome session expired" in rows[0][1]
 
 
 def test_create_app_body_matches_spaceship_post_app() -> None:

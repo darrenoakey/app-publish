@@ -58,6 +58,8 @@ Under an exclusive lock (other submits queue behind it):
   **idempotent** (rollback re-runs it).
 - **`./run health`** *(optional)* — probe only. If absent, greenline re-runs `./run deploy` as the health probe.
 
+When manually running the full check from an interactive agent, launch it detached and wait via the job monitor; the gate itself owns its five-minute cap.
+
 ## Test/code co-design (from docs/DOCTRINE.md — read it)
 
 Tests run in parallel with each other, with other agents' runs, and with live prod.

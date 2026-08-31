@@ -1,9 +1,12 @@
 import json
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 
-from notices import RecordedNoticeStore
+import psycopg2
+
+from notices import PostgresNoticeStore, TEST_NOTICE_DSN
 from session import IrisClient, ListedCookieSource
 from state import ProjectState
 
@@ -63,8 +66,10 @@ def test_run_notifies_when_chrome_session_expired(tmp_path: Path) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), PrivacyHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    notices = RecordedNoticeStore()
-    state = ProjectState(app_name="OL Golf", bundle_id="com.darrenoakey.olGolf", app_store_id="1")
+    app_store_id = f"privacy-{uuid.uuid4()}"
+    key = f"session-privacy:{app_store_id}"
+    notices = PostgresNoticeStore(TEST_NOTICE_DSN)
+    state = ProjectState(app_name="OL Golf", bundle_id="com.darrenoakey.olGolf", app_store_id=app_store_id)
     try:
         iris = IrisClient(
             ListedCookieSource([{"name": "myacinfo", "value": "abc"}]),
@@ -75,5 +80,14 @@ def test_run_notifies_when_chrome_session_expired(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join()
-    assert notices.rows[0][0] == "app-publish"
-    assert "DATA_NOT_COLLECTED" in notices.rows[0][2]
+    with psycopg2.connect(TEST_NOTICE_DSN) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT source, message FROM waggler_notifications WHERE idempotency_key = %s",
+                (key,),
+            )
+            rows = cursor.fetchall()
+            cursor.execute("DELETE FROM waggler_notifications WHERE idempotency_key = %s", (key,))
+        connection.commit()
+    assert rows[0][0] == "app-publish"
+    assert "DATA_NOT_COLLECTED" in rows[0][1]

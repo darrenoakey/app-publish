@@ -3,24 +3,15 @@ import uuid
 import psycopg2
 import pytest
 
-from notices import (
-    PostgresNoticeStore,
-    RecordedNoticeStore,
-    TEST_NOTICE_DSN,
-    _require_notice,
-)
+from notices import PostgresNoticeStore, TEST_NOTICE_DSN, _require_notice
 
 
-@pytest.mark.parametrize("store_factory", [RecordedNoticeStore, lambda: PostgresNoticeStore(TEST_NOTICE_DSN)])
-def test_notice_stores_insert_once_per_source_and_key(store_factory) -> None:
-    store = store_factory()
+def test_postgres_notice_store_inserts_once_per_source_and_key() -> None:
+    store = PostgresNoticeStore(TEST_NOTICE_DSN)
     source = "app-publish-test"
     key = f"notice-{uuid.uuid4()}"
     store.notify(source, key, "OL Golf REJECTED")
     store.notify(source, key, "OL Golf REJECTED again")
-    if isinstance(store, RecordedNoticeStore):
-        assert store.rows == [(source, key, "OL Golf REJECTED")]
-        return
     with psycopg2.connect(TEST_NOTICE_DSN) as connection:
         with connection.cursor() as cursor:
             cursor.execute(

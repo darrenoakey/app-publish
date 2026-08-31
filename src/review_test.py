@@ -1,11 +1,13 @@
 import json
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
+import psycopg2
 import requests
 
 from apple_portal import request as apple_request
-from notices import RecordedNoticeStore
+from notices import PostgresNoticeStore, TEST_NOTICE_DSN
 from review import (
     ReviewVersion,
     collect_review_status,
@@ -61,15 +63,21 @@ def local_request(base: str):
 
 
 def test_collect_and_watch_rejected_transition_against_local_asc(tmp_path) -> None:
+    version_id = f"review-{uuid.uuid4()}"
+    document = json.loads(json.dumps(REJECTED_DOCUMENT))
+    document["data"][0]["relationships"]["appStoreVersions"]["data"][0]["id"] = version_id
+    document["included"][0]["id"] = version_id
+    AppsHandler.document = document
     server = ThreadingHTTPServer(("127.0.0.1", 0), AppsHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    key = f"1:{version_id}:REJECTED"
     try:
         base = f"http://127.0.0.1:{server.server_address[1]}"
         rows = collect_review_status(local_request(base))
-        assert rows == [ReviewVersion("1", "OL Golf", "com.darrenoakey.olGolf", "1.0.2", "REJECTED", "v1")]
-        notices = RecordedNoticeStore()
+        assert rows == [ReviewVersion("1", "OL Golf", "com.darrenoakey.olGolf", "1.0.2", "REJECTED", version_id)]
         snapshot = tmp_path / "review-status.json"
+        notices = PostgresNoticeStore(TEST_NOTICE_DSN)
         first = watch_reviews(
             snapshot,
             local_request(base),
@@ -77,7 +85,6 @@ def test_collect_and_watch_rejected_transition_against_local_asc(tmp_path) -> No
             lookup=lambda name: "ITMS-90111: Unsupported SDK",
         )
         assert len(first) == 1
-        assert "ITMS-90111" in notices.rows[0][2]
         second = watch_reviews(
             snapshot,
             local_request(base),
@@ -85,12 +92,25 @@ def test_collect_and_watch_rejected_transition_against_local_asc(tmp_path) -> No
             lookup=lambda name: "ITMS-90111: Unsupported SDK",
         )
         assert second == []
-        assert len(notices.rows) == 1
-        assert snapshot_from(rows)["v1"] == "REJECTED"
+        assert snapshot_from(rows)[version_id] == "REJECTED"
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
+    with psycopg2.connect(TEST_NOTICE_DSN) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT message FROM waggler_notifications WHERE source = %s AND idempotency_key = %s",
+                ("app-publish", key),
+            )
+            messages = cursor.fetchall()
+            cursor.execute(
+                "DELETE FROM waggler_notifications WHERE source = %s AND idempotency_key = %s",
+                ("app-publish", key),
+            )
+        connection.commit()
+    assert len(messages) == 1
+    assert "ITMS-90111" in messages[0][0]
 
 
 def test_new_bad_states_ignore_ready_for_sale() -> None:
