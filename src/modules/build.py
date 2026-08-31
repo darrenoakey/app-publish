@@ -25,9 +25,15 @@ from utils import (
 # sync web content
 # sync web content to ios project using capacitor
 def sync_web_content(project_path: Path) -> bool:
-    print_info("Syncing web content to iOS...")
+    has_cap = (
+        (project_path / "capacitor.config.ts").exists()
+        or (project_path / "capacitor.config.json").exists()
+        or (project_path / "capacitor.config.js").exists()
+    )
+    if not has_cap:
+        return True
     ret_code, output = exec_cmd(
-        ["npx", "cap", "sync", "ios"],
+        ["npx", "--no-install", "cap", "sync", "ios"],
         cwd=project_path,
     )
     if ret_code != 0:
@@ -87,8 +93,13 @@ def find_xcode_project(project_path: Path, state: ProjectState) -> str:
 
 
 # ##################################################################
-# find xcode project
-# find the xcode project or workspace path
+# xcode bundle ready
+# xcodebuild hangs on empty .xcodeproj folders; require the real file
+def xcode_bundle_ready(path: str) -> bool:
+    bundle = Path(path)
+    if bundle.suffix == ".xcworkspace":
+        return (bundle / "contents.xcworkspacedata").is_file()
+    return (bundle / "project.pbxproj").is_file()
 
 
 # ##################################################################
@@ -97,7 +108,7 @@ def find_xcode_project(project_path: Path, state: ProjectState) -> str:
 def find_scheme(project_path: Path, state: ProjectState) -> str:
     xcode_project = find_xcode_project(project_path, state)
 
-    if not xcode_project:
+    if not xcode_project or not xcode_bundle_ready(xcode_project):
         return "App"  # default capacitor scheme
 
     # list schemes
@@ -130,6 +141,9 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
     xcode_project = find_xcode_project(project_path, state)
     if not xcode_project:
         print_error("No Xcode project found")
+        return False
+    if not xcode_bundle_ready(xcode_project):
+        print_error(f"Xcode project is incomplete: {xcode_project}")
         return False
 
     scheme = find_scheme(project_path, state)

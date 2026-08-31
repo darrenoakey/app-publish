@@ -164,7 +164,9 @@ def setup_web_project(project_path: Path, state: ProjectState) -> bool:
         "appId": state.bundle_id or existing_cap.get("appId") or "",
         "appName": app_name,
         "webDir": web_dir,
-        "server": existing_cap.get("server") if isinstance(existing_cap.get("server"), dict) else {"androidScheme": "https"},
+        "server": existing_cap.get("server")
+        if isinstance(existing_cap.get("server"), dict)
+        else {"androidScheme": "https"},
         "ios": existing_cap.get("ios") if isinstance(existing_cap.get("ios"), dict) else {"path": "ios"},
     }
     if isinstance(existing_cap.get("plugins"), dict):
@@ -182,7 +184,7 @@ def setup_web_project(project_path: Path, state: ProjectState) -> bool:
     else:
         print_info("Adding iOS platform...")
         ret_code, output = exec_cmd(
-            ["npx", "cap", "add", "ios"],
+            ["npx", "--no-install", "cap", "add", "ios"],
             cwd=project_path,
         )
         if ret_code != 0:
@@ -193,7 +195,7 @@ def setup_web_project(project_path: Path, state: ProjectState) -> bool:
     # Sync web content to iOS
     print_info("Syncing web content to iOS...")
     ret_code, output = exec_cmd(
-        ["npx", "cap", "sync", "ios"],
+        ["npx", "--no-install", "cap", "sync", "ios"],
         cwd=project_path,
     )
     if ret_code != 0:

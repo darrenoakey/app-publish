@@ -6,3 +6,6 @@ Pillow>=10.0.0
 daz-agent-sdk>=0.2.17
 daz-secrets @ git+https://github.com/darrenoakey/daz-secrets.git@ef01d96a2fa8d661a6a2ad7dace77fce0f2f60aa#subdirectory=python
 setproctitle>=1.3.0
+requests>=2.31.0
+psycopg2-binary>=2.9.9
+web-driver-client @ file:///Users/darrenoakey/src/web-driver/clients/python

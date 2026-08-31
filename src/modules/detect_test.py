@@ -94,9 +94,7 @@ def test_capacitor_layout_detects_nested_xcode_and_config_identity(tmp_path) -> 
     )
     xcode = tmp_path / "ios" / "App" / "App.xcodeproj"
     xcode.mkdir(parents=True)
-    (xcode / "project.pbxproj").write_text(
-        "PRODUCT_BUNDLE_IDENTIFIER = com.darrenoakey.olGolf;\n"
-    )
+    (xcode / "project.pbxproj").write_text("PRODUCT_BUNDLE_IDENTIFIER = com.darrenoakey.olGolf;\n")
 
     assert detect_existing_ios_project(tmp_path) == xcode
     assert detect_bundle_id(tmp_path) == "com.darrenoakey.olGolf"

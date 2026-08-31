@@ -12,6 +12,7 @@ from . import screenshots
 from . import metadata
 from . import support
 from . import appstore
+from . import privacy
 from . import upload
 from . import submit
 from . import deploy
@@ -28,6 +29,7 @@ __all__ = [
     "metadata",
     "support",
     "appstore",
+    "privacy",
     "upload",
     "submit",
     "deploy",

@@ -181,15 +181,11 @@ def sign_app_bundle(
         xml_start = output.find("<?xml")
         xml_end = output.rfind("</plist>")
         if xml_start < 0 or xml_end < 0:
-            raise apple_portal.ApplePortalError(
-                f"codesign entitlements not parseable: {output[:200]}"
-            )
+            raise apple_portal.ApplePortalError(f"codesign entitlements not parseable: {output[:200]}")
         dumped = plistlib.loads(output[xml_start : xml_end + len("</plist>")].encode())
         app_id = dumped.get("application-identifier") if isinstance(dumped, dict) else None
         if not app_id or not str(app_id).startswith(f"{TEAM_ID}."):
-            raise apple_portal.ApplePortalError(
-                "signed app is missing application-identifier entitlement"
-            )
+            raise apple_portal.ApplePortalError("signed app is missing application-identifier entitlement")
         for bundle, _, _ in bundles:
             info_path = bundle / "Info.plist"
             executable_root = bundle

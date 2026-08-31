@@ -1,21 +1,19 @@
 # app store module - creates the app in app store connect
 #
-# handles:
-# - checking if app already exists via app store connect api
-# - opening the website and providing exact instructions if app doesn't exist
-# - getting the app id for subsequent operations
-
-import time
-import webbrowser
-import subprocess
+# JWT GET finds an existing app. Creating a new app is iris POST
+# /v1/apps with the seeded Chrome Apple ID session — the public
+# JWT API returns 403 FORBIDDEN_ERROR apps does not allow CREATE.
 from pathlib import Path
 
 import sys
+import time
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState, load_state, save_state
 from config import API_KEY_ID, API_ISSUER_ID, API_PRIVATE_KEY
+from notices import PostgresNoticeStore
+from session import IrisClient, SessionExpired, default_iris
 from utils import (
     print_info,
     print_success,
@@ -176,91 +174,158 @@ def check_app_exists_api(bundle_id: str, base_url: str = BASE_URL) -> tuple[bool
 
 
 # ##################################################################
-# open app store connect and show instructions
-# opens app store connect website and prints exact instructions for creating new app
-def open_app_store_connect_and_show_instructions(state: ProjectState):
-    # Prepare all the values - fail if not set
-    if not state.app_name:
-        print_error("app_name not set in state")
-        return
-    if not state.bundle_id:
-        print_error("bundle_id not set in state")
-        return
-    # Open the website
-    url = "https://appstoreconnect.apple.com/apps"
-    print_info(f"Opening: {url}")
-
-    try:
-        # Use 'open' command on macOS
-        subprocess.run(["open", url], check=True)
-    except Exception:
-        try:
-            webbrowser.open(url)
-        except Exception:
-            print_info(f"Please open manually: {url}")
-
-    for line in creation_instructions(state):
-        print(line)
+# create app body
+# Spaceship ConnectAPI post_app payload for a single iOS app
+def create_app_body(name: str, bundle_id: str, sku: str, version_string: str) -> dict:
+    locale = "en-US"
+    return {
+        "data": {
+            "type": "apps",
+            "attributes": {
+                "sku": sku,
+                "primaryLocale": locale,
+                "bundleId": bundle_id,
+            },
+            "relationships": {
+                "appStoreVersions": {"data": [{"type": "appStoreVersions", "id": "${store-version-IOS}"}]},
+                "appInfos": {"data": [{"type": "appInfos", "id": "${new-appInfo-id}"}]},
+            },
+        },
+        "included": [
+            {
+                "type": "appInfos",
+                "id": "${new-appInfo-id}",
+                "relationships": {
+                    "appInfoLocalizations": {
+                        "data": [
+                            {
+                                "type": "appInfoLocalizations",
+                                "id": "${new-appInfoLocalization-id}",
+                            }
+                        ]
+                    }
+                },
+            },
+            {
+                "type": "appInfoLocalizations",
+                "id": "${new-appInfoLocalization-id}",
+                "attributes": {"locale": locale, "name": name},
+            },
+            {
+                "type": "appStoreVersions",
+                "id": "${store-version-IOS}",
+                "attributes": {"platform": "IOS", "versionString": version_string},
+                "relationships": {
+                    "appStoreVersionLocalizations": {
+                        "data": [
+                            {
+                                "type": "appStoreVersionLocalizations",
+                                "id": "${new-IOSVersionLocalization-id}",
+                            }
+                        ]
+                    }
+                },
+            },
+            {
+                "type": "appStoreVersionLocalizations",
+                "id": "${new-IOSVersionLocalization-id}",
+                "attributes": {"locale": locale},
+            },
+        ],
+    }
 
 
 # ##################################################################
-# open app store connect and show instructions
-# opens app store connect website and prints exact instructions for creating new app
+# create app
+# iris POST /v1/apps using the Chrome Apple ID session
+def create_app(state: ProjectState, iris: IrisClient) -> str:
+    sku = state.bundle_id.replace(".", "_")
+    document = iris.request(
+        "POST",
+        "v1/apps",
+        json_body=create_app_body(
+            name=state.app_name,
+            bundle_id=state.bundle_id,
+            sku=sku,
+            version_string=state.current_version or "1.0",
+        ),
+    )
+    return str(document["data"]["id"])
+
+
+# ##################################################################
+# session expired notice
+# tell Beezle the Mac mini Chrome profile is not logged into App Store Connect
+def session_expired_notice(state: ProjectState, notices=None) -> None:
+    store = notices or PostgresNoticeStore()
+    store.notify(
+        "app-publish",
+        f"session-create:{state.bundle_id}",
+        (
+            "App Store Connect Chrome session expired. Cannot create "
+            f"{state.app_name} ({state.bundle_id}). Log into "
+            "appstoreconnect.apple.com in the Mac mini Chrome profile used by web-driver."
+        ),
+    )
 
 
 # ##################################################################
 # check app exists
-# checks if app exists in app store connect and gets its id
+# JWT lookup only — creation is iris POST in run()
 def check_app_exists(project_path: Path, state: ProjectState, base_url: str = BASE_URL) -> bool:
+    del project_path
     print_info(f"Checking App Store Connect for: {state.bundle_id}")
-
-    # Try direct API first
     exists, app_id = check_app_exists_api(state.bundle_id, base_url)
-
     if exists is True:
         state.app_store_id = app_id
         print_success("App found in App Store Connect")
         print_info(f"App Store ID: {app_id}")
         return True
-    elif exists is False:
-        # App definitely doesn't exist - show instructions
+    if exists is False:
         print_warning("App not found in App Store Connect")
-        open_app_store_connect_and_show_instructions(state)
         return False
-    else:
-        print_error("App Store Connect API check failed")
-        return False
-
-
-# ##################################################################
-# ensure create app lane
-# ensures the create_app lane exists in fastfile
+    print_error("App Store Connect API check failed")
+    return False
 
 
 # ##################################################################
 # run
-# runs app store creation step
-# checks if app exists in app store connect, if not opens website with instructions
-def run(project_path: Path, state: ProjectState, base_url: str = BASE_URL) -> bool:
+# find the app via JWT or create it via iris session
+def run(
+    project_path: Path,
+    state: ProjectState,
+    base_url: str = BASE_URL,
+    iris: IrisClient | None = None,
+    notices=None,
+) -> bool:
     if not state.bundle_id:
         print_error("No bundle ID - run identity step first")
         return False
-
     if not state.app_name:
         print_error("No app name - run identity step first")
         return False
-
-    # Check if app exists (will open website and show instructions if not)
-    if not check_app_exists(project_path, state, base_url):
+    print_info(f"Checking App Store Connect for: {state.bundle_id}")
+    exists, app_id = check_app_exists_api(state.bundle_id, base_url)
+    if exists is True:
+        state.app_store_id = app_id
+        print_success("App found in App Store Connect")
+        print_info(f"App Store ID: {app_id}")
+        return True
+    if exists is None:
+        print_error("App Store Connect API check failed")
         return False
-
+    print_info("App not found; creating via iris session")
+    client = iris or default_iris()
+    try:
+        created = create_app(state, client)
+    except SessionExpired as err:
+        session_expired_notice(state, notices)
+        print_error(str(err))
+        return False
+    state.app_store_id = created
+    print_success("App created in App Store Connect")
+    print_info(f"App Store ID: {created}")
     return True
-
-
-# ##################################################################
-# run
-# runs app store creation step
-# checks if app exists in app store connect, if not opens website with instructions
 
 
 if __name__ == "__main__":

@@ -16,17 +16,13 @@ from modules.signing import (
 from state import ProjectState
 
 
-def test_existing_bundle_id_is_verified_through_real_apple_api() -> None:
-    assert ensure_bundle_id("com.darrenoakey.olBridge", "OL Bridge")
+def test_real_bundle_is_profiled_and_signed_without_keychain(tmp_path) -> None:
+    bundle_id = "com.darrenoakey.olBridge"
+    assert ensure_bundle_id(bundle_id, "OL Bridge")
 
-
-def test_distribution_identity_state_comes_from_real_encrypted_provider() -> None:
     expected = apple_portal.secrets_store.get_secret_bytes(apple_portal.SERVICE, apple_portal.P12_ACCOUNT) is not None
     assert has_distribution_cert() is expected
 
-
-def test_real_bundle_is_profiled_and_signed_without_keychain(tmp_path) -> None:
-    bundle_id = "com.darrenoakey.olBridge"
     app = tmp_path / "OLBridge.app"
     app.mkdir()
     executable = app / "OLBridge"

@@ -53,9 +53,7 @@ def test_structure_keeps_existing_capacitor_web_layout(tmp_path) -> None:
     )
     xcode = tmp_path / "ios" / "App" / "App.xcodeproj"
     xcode.mkdir(parents=True)
-    (xcode / "project.pbxproj").write_text(
-        "PRODUCT_BUNDLE_IDENTIFIER = com.darrenoakey.olGolf;\n"
-    )
+    (xcode / "project.pbxproj").write_text("PRODUCT_BUNDLE_IDENTIFIER = com.darrenoakey.olGolf;\n")
 
     state = ProjectState(
         project_type="web",
@@ -70,7 +68,6 @@ def test_structure_keeps_existing_capacitor_web_layout(tmp_path) -> None:
     assert '"webDir": "web"' in config
     assert '"appId": "com.darrenoakey.olGolf"' in config
     assert "StatusBar" in config
-
 
 
 def test_structure_preserves_existing_local_automation_files(tmp_path) -> None:

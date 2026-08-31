@@ -40,6 +40,7 @@ from modules import (
     metadata,
     support,
     appstore,
+    privacy,
     upload,
     submit,
     deploy,
@@ -98,6 +99,7 @@ STEP_MODULES = {
     "metadata": metadata,
     "support": support,
     "appstore_create": appstore,
+    "privacy": privacy,
     "upload": upload,
     "submit": submit,
     "deploy": deploy,
@@ -274,8 +276,30 @@ Examples:
         metavar="DEVICE",
         help="Deploy to iOS device (default: Starbuck)",
     )
+    parser.add_argument(
+        "--review",
+        action="store_true",
+        help="Print live App Store Connect review states",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Diff review states and ping Beezle on new rejections",
+    )
 
     args = parser.parse_args()
+
+    if args.review:
+        from review import print_reviews
+
+        return print_reviews()
+    if args.watch:
+        from review import watch_reviews
+        from utils import print_success
+
+        transitions = watch_reviews()
+        print_success(f"watch recorded {len(transitions)} new bad states")
+        return 0
 
     # resolve project path
     project_path = Path(args.project).expanduser().resolve()

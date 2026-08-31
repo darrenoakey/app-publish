@@ -399,6 +399,8 @@ def xcode_build(
     configuration: str = "Release",
     destination: str = "generic/platform=iOS",
 ) -> tuple[bool, str]:
+    if not project_path.exists():
+        return False, f"Project not found: {project_path}"
     cmd = [
         "xcodebuild",
         "-project",
@@ -424,6 +426,8 @@ def xcode_archive(
     archive_path: Path,
     configuration: str = "Release",
 ) -> tuple[bool, str]:
+    if not project_path.exists():
+        return False, f"Project not found: {project_path}"
     cmd = [
         "xcodebuild",
         "-project",

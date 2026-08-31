@@ -40,19 +40,29 @@ def _required_text(account: str) -> str:
     return value.strip()
 
 
+_cached_token: tuple[int, str] = (0, "")
+
+
 def _token() -> str:
+    global _cached_token
     now = int(dt.datetime.now(tz=dt.UTC).timestamp())
-    return jwt.encode(
+    exp, token = _cached_token
+    if exp > now + 60 and token:
+        return token
+    new_exp = now + 10 * 60
+    new_token = jwt.encode(
         {
             "iss": _required_text("api_issuer_id"),
             "iat": now,
-            "exp": now + 10 * 60,
+            "exp": new_exp,
             "aud": "appstoreconnect-v1",
         },
         _required_text("api_private_key"),
         algorithm="ES256",
         headers={"alg": "ES256", "kid": _required_text("api_key_id"), "typ": "JWT"},
     )
+    _cached_token = (new_exp, new_token)
+    return new_token
 
 
 def request(

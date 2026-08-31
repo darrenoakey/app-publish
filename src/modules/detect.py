@@ -131,7 +131,6 @@ def generate_bundle_id(project_name: str) -> str:
     return f"{BUNDLE_ID_PREFIX}{sanitized}"
 
 
-
 def run(project_path: Path, state: ProjectState) -> bool:
     # ##################################################################
     # run detection step

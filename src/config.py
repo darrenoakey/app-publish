@@ -97,6 +97,7 @@ PIPELINE_STEPS = [
     "metadata",
     "support",  # create/update support page
     "appstore_create",
+    "privacy",
     "upload",
     "submit",
     "deploy",  # deploy to Starbuck (best-effort final step)

@@ -47,6 +47,30 @@ def command_status(args: argparse.Namespace) -> int:
 
 
 # ##################################################################
+# command review
+# print live App Store Connect review states
+def command_review(args: argparse.Namespace) -> int:
+    del args
+    return run_command([
+        sys.executable,
+        str(SCRIPT_DIR / "src" / "app_publish.py"),
+        "--review",
+    ])
+
+
+# ##################################################################
+# command watch
+# diff review states and ping Beezle on new rejections
+def command_watch(args: argparse.Namespace) -> int:
+    del args
+    return run_command([
+        sys.executable,
+        str(SCRIPT_DIR / "src" / "app_publish.py"),
+        "--watch",
+    ])
+
+
+# ##################################################################
 # command restart
 # restart pipeline from beginning
 def command_restart(args: argparse.Namespace) -> int:
@@ -169,6 +193,12 @@ def main(argv: list[str]) -> int:
     # status
     p_status = sub.add_parser("status", help="Show pipeline status")
     p_status.set_defaults(func=command_status)
+
+    p_review = sub.add_parser("review", help="Print live App Store Connect review states")
+    p_review.set_defaults(func=command_review)
+
+    p_watch = sub.add_parser("watch", help="Diff review states and ping Beezle on new rejections")
+    p_watch.set_defaults(func=command_watch)
 
     # restart
     p_restart = sub.add_parser("restart", help="Restart pipeline from beginning")
