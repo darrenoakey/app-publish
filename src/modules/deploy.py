@@ -169,23 +169,25 @@ def find_connected_devices() -> list[dict]:
     devices = []
     seen_ids = set()
 
-    # Try xctrace first (most reliable for USB)
-    ret_code, output = exec_cmd(["xcrun", "xctrace", "list", "devices"], timeout=30)
+    # Probe USB (xctrace) and USB/WiFi (ios-deploy) concurrently. Each tool
+    # can be the only one that sees the device, and serial probing costs
+    # ~18s before every deploy.
+    from concurrent.futures import ThreadPoolExecutor
 
-    if ret_code == 0:
-        devices.extend(parse_xctrace_devices(output))
-        seen_ids.update(device["id"] for device in devices)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        xctrace_future = pool.submit(exec_cmd, ["xcrun", "xctrace", "list", "devices"], timeout=30)
+        ios_deploy_future = pool.submit(exec_cmd, ["ios-deploy", "-c", "--timeout", "5"], timeout=15)
 
-    # Also try ios-deploy -c (finds WiFi devices xctrace misses)
-    ret_code, output = exec_cmd(
-        ["ios-deploy", "-c", "--timeout", "5"],
-        timeout=15,
-    )
+        ret_code, output = xctrace_future.result()
+        if ret_code == 0:
+            devices.extend(parse_xctrace_devices(output))
+            seen_ids.update(device["id"] for device in devices)
 
-    if ret_code == 0:
-        discovered = parse_ios_deploy_devices(output, seen_ids)
-        devices.extend(discovered)
-        seen_ids.update(device["id"] for device in discovered)
+        ret_code, output = ios_deploy_future.result()
+        if ret_code == 0:
+            discovered = parse_ios_deploy_devices(output, seen_ids)
+            devices.extend(discovered)
+            seen_ids.update(device["id"] for device in discovered)
 
     # Try devicectl if nothing was found yet
     if not devices:
