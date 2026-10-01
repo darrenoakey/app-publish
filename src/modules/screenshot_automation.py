@@ -67,7 +67,12 @@ def launch_app(device_name: str, bundle_id: str) -> bool:
 # capture screenshot
 # capture screenshot from simulator
 def capture_screenshot(device_name: str, output_path: Path) -> bool:
-    ret_code, output = exec_cmd(["xcrun", "simctl", "io", device_name, "screenshot", str(output_path)])
+    # Bounded: simctl can hang for minutes on a loaded machine (measured >30s
+    # even for a nonexistent device); a capture that slow is a failed capture.
+    ret_code, output = exec_cmd(
+        ["xcrun", "simctl", "io", device_name, "screenshot", str(output_path)],
+        timeout=20,
+    )
     return ret_code == 0
 
 

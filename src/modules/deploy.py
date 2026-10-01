@@ -313,32 +313,32 @@ def build_for_device(
 
 # ##################################################################
 # install on device
-# installs app on connected device - tries ios-deploy first (reliable),
-# falls back to devicectl
+# builds the installer command attempts in priority order:
+# devicectl first (Xcode 15+, maintained, measured ~3s on iOS 27),
+# ios-deploy last (unmaintained; measured hanging >180s on modern iOS).
+def install_command_attempts(app_path: str, device_id: str | None = None) -> list[list[str]]:
+    devicectl = ["xcrun", "devicectl", "device", "install", "app"]
+    if device_id:
+        devicectl.extend(["--device", device_id])
+    devicectl.append(app_path)
+
+    ios_deploy = ["ios-deploy", "--bundle", app_path]
+    if device_id:
+        ios_deploy.extend(["--id", device_id])
+
+    return [devicectl, ios_deploy]
+
+
+# installs app on connected device - tries each installer attempt in order
+# (devicectl first, legacy ios-deploy last) until one succeeds
 def install_on_device(app_path: str, device_id: str | None = None) -> bool:
     print_info(f"Installing {Path(app_path).name}...")
 
-    # Try ios-deploy first (works over USB and WiFi, most reliable)
-    cmd = ["ios-deploy", "--bundle", app_path]
-    if device_id:
-        cmd.extend(["--id", device_id])
-
-    ret_code, output = exec_cmd(cmd, timeout=120)
-
-    if ret_code == 0:
-        return True
-
-    # Try devicectl next (Xcode 15+)
-    print_info("ios-deploy failed, trying devicectl...")
-    cmd = ["xcrun", "devicectl", "device", "install", "app"]
-    if device_id:
-        cmd.extend(["--device", device_id])
-    cmd.append(app_path)
-
-    ret_code, output = exec_cmd(cmd, timeout=120)
-
-    if ret_code == 0:
-        return True
+    for cmd in install_command_attempts(app_path, device_id):
+        ret_code, output = exec_cmd(cmd, timeout=120)
+        if ret_code == 0:
+            return True
+        print_info(f"{' '.join(cmd[:2])} failed, trying next installer...")
 
     print_error("Installation failed")
     print_info("Make sure device is unlocked and trusts this computer")

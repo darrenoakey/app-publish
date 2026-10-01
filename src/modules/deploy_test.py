@@ -8,6 +8,7 @@ from modules.deploy import (
     detect_project_type,
     ensure_dev_profile,
     find_connected_devices,
+    install_command_attempts,
     install_on_device,
     parse_devicectl_devices,
     parse_ios_deploy_devices,
@@ -102,6 +103,23 @@ def test_local_deploy_boundaries_fail_before_any_device_change(tmp_path) -> None
     (command_directory / "cap").symlink_to("/usr/bin/false")
     assert sync_web_content(tmp_path) is True
     assert install_on_device(str(tmp_path / "Missing.app"), "missing-device-id") is False
+
+
+def test_install_command_attempts_put_devicectl_before_ios_deploy() -> None:
+    attempts = install_command_attempts("/tmp/App.app", "some-device-id")
+    assert len(attempts) == 2
+    assert "devicectl" in attempts[0][1]
+    assert "--device" in attempts[0]
+    assert "some-device-id" in attempts[0]
+    assert attempts[1][0] == "ios-deploy"
+    assert "--id" in attempts[1]
+
+
+def test_install_command_attempts_work_without_a_device_id() -> None:
+    attempts = install_command_attempts("/tmp/App.app")
+    assert len(attempts) == 2
+    assert "--device" not in attempts[0]
+    assert "--id" not in attempts[1]
 
 
 def test_connected_device_discovery_uses_the_real_apple_toolchain() -> None:
