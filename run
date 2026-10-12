@@ -1,11 +1,51 @@
 #!/usr/bin/env python3
-import argparse
+import hashlib
+import os
+import shutil
 import subprocess
 import sys
-import os
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).parent.resolve()
+_ROOT = Path(__file__).parent.resolve()
+_VENV = _ROOT / ".venv"
+_PINNED_MINOR = "3.14"
+_STAMP = _VENV / ".requirements.sha256"
+
+
+# ##################################################################
+# bootstrap venv
+# always run inside the project venv (pinned python), creating or resyncing it
+# when missing or when requirements.txt / pinned python changes, then re-exec
+def _bootstrap_venv() -> None:
+    venv_python = _VENV / "bin" / "python"
+    if Path(sys.prefix).resolve() == _VENV.resolve():
+        return
+    want = hashlib.sha256((_ROOT / "requirements.txt").read_bytes() + _PINNED_MINOR.encode()).hexdigest()
+    if not venv_python.exists() or not _STAMP.exists() or _STAMP.read_text().strip() != want:
+        base = shutil.which(f"python{_PINNED_MINOR}") or f"/opt/homebrew/bin/python{_PINNED_MINOR}"
+        if not os.path.exists(base):
+            sys.exit(f"ERROR: python{_PINNED_MINOR} is required to build the app-publish venv")
+        print(f"app-publish: syncing venv with python{_PINNED_MINOR}...", file=sys.stderr)
+        try:
+            subprocess.check_call([base, "-m", "venv", "--clear", str(_VENV)], stdout=sys.stderr)
+            subprocess.check_call(
+                [str(venv_python), "-m", "pip", "install", "-q", "-r", str(_ROOT / "requirements.txt")],
+                stdout=sys.stderr,
+            )
+        except subprocess.CalledProcessError as exc:
+            shutil.rmtree(_VENV, ignore_errors=True)
+            sys.exit(f"ERROR: app-publish venv build failed ({exc}); rerun to retry")
+        _STAMP.write_text(want + "\n")
+    os.environ["PATH"] = f"{_VENV / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+    os.execv(str(venv_python), [str(venv_python), str(_ROOT / "run"), *sys.argv[1:]])
+
+
+_bootstrap_venv()
+
+import argparse
+import subprocess
+
+SCRIPT_DIR = _ROOT
 TEST_OUT = SCRIPT_DIR / "output" / "testing"
 
 
