@@ -101,7 +101,7 @@ def test_local_deploy_boundaries_fail_before_any_device_change(tmp_path) -> None
     command_directory = tmp_path / "node_modules" / ".bin"
     command_directory.mkdir(parents=True)
     (command_directory / "cap").symlink_to("/usr/bin/false")
-    assert sync_web_content(tmp_path) is True
+    assert sync_web_content(tmp_path) is False
     assert install_on_device(str(tmp_path / "Missing.app"), "missing-device-id") is False
 
 

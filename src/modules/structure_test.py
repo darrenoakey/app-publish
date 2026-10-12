@@ -47,6 +47,8 @@ def test_structure_keeps_existing_capacitor_web_layout(tmp_path) -> None:
     (tmp_path / "web" / "index.html").write_text("<main>felt</main>")
     (tmp_path / "package.json").write_text('{"name":"ol-golf"}')
     (tmp_path / "node_modules" / "@capacitor").mkdir(parents=True)
+    (tmp_path / "node_modules" / ".bin").mkdir()
+    (tmp_path / "node_modules" / ".bin" / "cap").symlink_to("/usr/bin/true")
     (tmp_path / "capacitor.config.json").write_text(
         '{"appId":"com.darrenoakey.olGolf","appName":"OL Golf","webDir":"web",'
         '"plugins":{"StatusBar":{"overlaysWebView":false}}}'
@@ -68,6 +70,18 @@ def test_structure_keeps_existing_capacitor_web_layout(tmp_path) -> None:
     assert '"webDir": "web"' in config
     assert '"appId": "com.darrenoakey.olGolf"' in config
     assert "StatusBar" in config
+
+
+def test_structure_fails_when_capacitor_sync_fails(tmp_path) -> None:
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "index.html").write_text("<main>felt</main>")
+    (tmp_path / "package.json").write_text('{"name":"ol-golf"}')
+    (tmp_path / "node_modules" / ".bin").mkdir(parents=True)
+    (tmp_path / "node_modules" / ".bin" / "cap").symlink_to("/usr/bin/false")
+    (tmp_path / "capacitor.config.json").write_text('{"appId":"com.x.y","appName":"X","webDir":"web"}')
+    (tmp_path / "ios" / "App" / "App.xcodeproj").mkdir(parents=True)
+    state = ProjectState(project_type="web", project_name="x", bundle_id="com.x.y")
+    assert setup_web_project(tmp_path, state) is False
 
 
 def test_structure_preserves_existing_local_automation_files(tmp_path) -> None:

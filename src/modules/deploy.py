@@ -18,6 +18,7 @@ from config import TEAM_ID
 from modules.signing import sign_app_bundle
 from state import ProjectState, load_state
 from utils import (
+    capacitor_sync,
     print_info,
     print_success,
     print_warning,
@@ -109,14 +110,7 @@ def ensure_dev_profile(bundle_id: str) -> bool:
 # this MUST be called before building to ensure latest changes are deployed
 def sync_web_content(project_path: Path) -> bool:
     print_info("Syncing web content to iOS...")
-    ret_code, output = exec_cmd(
-        ["npx", "cap", "sync", "ios"],
-        cwd=project_path,
-    )
-    if ret_code != 0:
-        print_warning(f"Capacitor sync warning: {output}")
-        # don't fail on warnings
-    return True
+    return capacitor_sync(project_path, no_install=False)
 
 
 def parse_xctrace_devices(output: str) -> list[dict]:

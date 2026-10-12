@@ -8,9 +8,9 @@ from state import ProjectState, load_state, save_state
 from config import TEAM_ID
 from modules.signing import sign_app_bundle
 from utils import (
+    capacitor_sync,
     print_info,
     print_success,
-    print_warning,
     print_error,
     run as exec_cmd,
     ensure_dir,
@@ -32,14 +32,7 @@ def sync_web_content(project_path: Path) -> bool:
     )
     if not has_cap:
         return True
-    ret_code, output = exec_cmd(
-        ["npx", "--no-install", "cap", "sync", "ios"],
-        cwd=project_path,
-    )
-    if ret_code != 0:
-        print_warning(f"Capacitor sync warning: {output}")
-        # don't fail on warnings
-    return True
+    return capacitor_sync(project_path)
 
 
 # ##################################################################

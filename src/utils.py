@@ -73,6 +73,22 @@ def print_error(msg: str) -> None:
 
 
 # ##################################################################
+# capacitor sync
+# run `cap sync ios`; a nonzero exit is fatal because continuing would build and
+# ship a stale ios/App/App/public
+def capacitor_sync(project_path: Path, no_install: bool = True) -> bool:
+    command = ["npx"] + (["--no-install"] if no_install else []) + ["cap", "sync", "ios"]
+    ret_code, output = run(command, cwd=project_path)
+    if ret_code == 0:
+        return True
+    print_error(
+        f"Capacitor sync failed (exit {ret_code}); refusing to build stale web content. "
+        f"Run `npm ci` in {project_path} to restore missing dependencies, then retry.\n{output}"
+    )
+    return False
+
+
+# ##################################################################
 # print warning
 # print warning message with warn prefix
 def print_warning(msg: str) -> None:

@@ -12,9 +12,17 @@ from modules.build import (
 from state import ProjectState
 
 
-def test_sync_web_content_runs_without_raising(tmp_path: Path) -> None:
+def test_sync_web_content_fails_when_capacitor_sync_fails(tmp_path: Path) -> None:
+    # no capacitor config: nothing to sync
     assert sync_web_content(tmp_path) is True
+    # capacitor project whose cli is missing (no node_modules): the real npx call
+    # exits nonzero and the build must refuse to continue with stale web content
     (tmp_path / "capacitor.config.json").write_text("{}")
+    assert sync_web_content(tmp_path) is False
+    # a working cli lets the build proceed
+    command_directory = tmp_path / "node_modules" / ".bin"
+    command_directory.mkdir(parents=True)
+    (command_directory / "cap").symlink_to("/usr/bin/true")
     assert sync_web_content(tmp_path) is True
 
 

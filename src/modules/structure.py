@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState
 from utils import (
+    capacitor_sync,
     print_info,
     print_success,
     print_warning,
@@ -194,13 +195,8 @@ def setup_web_project(project_path: Path, state: ProjectState) -> bool:
 
     # Sync web content to iOS
     print_info("Syncing web content to iOS...")
-    ret_code, output = exec_cmd(
-        ["npx", "--no-install", "cap", "sync", "ios"],
-        cwd=project_path,
-    )
-    if ret_code != 0:
-        print_warning(f"Capacitor sync warning: {output}")
-        # Don't fail on sync warnings
+    if not capacitor_sync(project_path):
+        return False
 
     # Update Xcode project settings - Capacitor nests under ios/App/
     from modules.detect import detect_existing_ios_project
