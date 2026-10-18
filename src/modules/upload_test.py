@@ -498,10 +498,15 @@ def test_category_rating_content_and_price_planning() -> None:
     assert get_category_id("unused", "NEWID") == "NEWID"
     assert get_category_id("unused", "Unlisted") is None
 
+    # a subcategory of the primary is primarySubcategoryOne, never secondaryCategory
     categories = categories_payload("info-1", "Games", "Card")
     assert categories["data"]["relationships"] == {
         "primaryCategory": {"data": {"type": "appCategories", "id": "GAMES"}},
-        "secondaryCategory": {"data": {"type": "appCategories", "id": "GAMES_CARD"}},
+        "primarySubcategoryOne": {"data": {"type": "appCategories", "id": "GAMES_CARD"}},
+    }
+    assert categories_payload("info-1", "Games", "Education")["data"]["relationships"] == {
+        "primaryCategory": {"data": {"type": "appCategories", "id": "GAMES"}},
+        "secondaryCategory": {"data": {"type": "appCategories", "id": "EDUCATION"}},
     }
     assert categories_payload("info-1", "Games")["data"]["relationships"] == {
         "primaryCategory": {"data": {"type": "appCategories", "id": "GAMES"}}
@@ -515,7 +520,10 @@ def test_category_rating_content_and_price_planning() -> None:
     assert rating["gambling"] is False
     assert rating["unrestrictedWebAccess"] is False
     assert rating["violenceRealistic"] == "NONE"
-    assert len(rating) == 14
+    assert rating["gunsOrOtherWeapons"] == "NONE"
+    assert rating["userGeneratedContent"] is False
+    assert rating["advertising"] is False
+    assert len(rating) == 24
 
     assert content_rights_payload("app-1", False)["data"]["attributes"] == {
         "contentRightsDeclaration": "DOES_NOT_USE_THIRD_PARTY_CONTENT"
@@ -539,6 +547,9 @@ def test_category_rating_content_and_price_planning() -> None:
     assert find_price_point(points, "4.99") == "price-2"
     assert find_price_point(points, "9.99") is None
     assert find_price_point(None, "4.99") is None
+    free = {"data": [{"id": "price-0", "attributes": {"customerPrice": "0.0"}}]}
+    assert find_price_point(free, "0.00") == "price-0"
+    assert find_price_point({"data": [{"id": "x", "attributes": {"customerPrice": None}}]}, "0.00") is None
     schedule = price_schedule_payload("app-1", "price-2")
     assert schedule["data"]["relationships"]["baseTerritory"]["data"]["id"] == "USA"
     assert schedule["included"][0]["relationships"]["appPricePoint"]["data"]["id"] == "price-2"

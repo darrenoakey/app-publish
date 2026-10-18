@@ -752,10 +752,23 @@ def age_rating_attributes() -> dict[str, Any]:
         "violenceRealistic",
         "violenceRealisticProlongedGraphicOrSadistic",
     )
+    # App Store Connect's 2025 age-rating questionnaire rejects a PATCH
+    # that omits any of the newer boolean/enum questions, so declare all of
+    # them explicitly as the "none / not applicable" answers
     return {
         **dict.fromkeys(descriptors, "NONE"),
         "gambling": False,
         "unrestrictedWebAccess": False,
+        "advertising": False,
+        "gunsOrOtherWeapons": "NONE",
+        "healthOrWellnessTopics": False,
+        "lootBox": False,
+        "messagingAndChat": False,
+        "parentalControls": False,
+        "ageAssurance": False,
+        "socialMedia": False,
+        "socialMediaAgeRestricted": False,
+        "userGeneratedContent": False,
     }
 
 
@@ -791,7 +804,12 @@ def categories_payload(app_info_id: str, primary: str, secondary: str | None = N
     relationships = {"primaryCategory": {"data": relationship("appCategories", primary_id)}}
     secondary_id = get_category_id("", secondary) if secondary else None
     if secondary_id:
-        relationships["secondaryCategory"] = {"data": relationship("appCategories", secondary_id)}
+        # a subcategory of the primary (GAMES -> GAMES_CARD) is a
+        # primarySubcategoryOne; ASC rejects it as a secondaryCategory
+        if secondary_id.startswith(primary_id + "_"):
+            relationships["primarySubcategoryOne"] = {"data": relationship("appCategories", secondary_id)}
+        else:
+            relationships["secondaryCategory"] = {"data": relationship("appCategories", secondary_id)}
     return resource_payload("appInfos", app_info_id, relationships=relationships)
 
 
@@ -836,9 +854,17 @@ def related_price_endpoint(price: dict) -> str | None:
     return link.removeprefix(f"{API_BASE_URL}/") if link else None
 
 
+def same_price(customer_price: Any, price_usd: str) -> bool:
+    # ASC returns "0.0" for the free tier while callers write "0.00"
+    try:
+        return float(customer_price) == float(price_usd)
+    except (TypeError, ValueError):
+        return False
+
+
 def find_price_point(response: dict | None, price_usd: str) -> str | None:
     for resource in (response or {}).get("data", []):
-        if resource.get("attributes", {}).get("customerPrice") == price_usd:
+        if same_price(resource.get("attributes", {}).get("customerPrice"), price_usd):
             return resource.get("id")
     return None
 
@@ -870,7 +896,7 @@ def set_pricing(token: str, app_id: str, price_usd: str = "4.99") -> bool:
         endpoint = related_price_endpoint(price)
         if endpoint:
             current = first_data(api_request("GET", endpoint, token))
-            if current and current.get("attributes", {}).get("customerPrice") == price_usd:
+            if current and same_price(current.get("attributes", {}).get("customerPrice"), price_usd):
                 return True
     points = api_request("GET", f"apps/{app_id}/appPricePoints?filter[territory]=USA&limit=200", token)
     point_id = find_price_point(points, price_usd)
