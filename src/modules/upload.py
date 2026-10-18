@@ -57,6 +57,7 @@ DISPLAY_TYPES = {
     "iPhone-16-Plus": "APP_IPHONE_67",
     "iPad Pro 13-inch": "APP_IPAD_PRO_3GEN_129",
     "iPad-Pro-13-inch": "APP_IPAD_PRO_3GEN_129",
+    "iPad Pro 12.9": "APP_IPAD_PRO_3GEN_129",
     "iPad Pro 11-inch": "APP_IPAD_PRO_3GEN_11",
     "iPad-Pro-11-inch": "APP_IPAD_PRO_3GEN_11",
 }
@@ -669,11 +670,17 @@ def upload_screenshot(token: str, screenshot_set_id: str, filepath: Path) -> boo
     return response_succeeded(execute_plan(screenshot_commit(resource), token))
 
 
+def compact_name(text: str) -> str:
+    # "iPhone 16 Pro Max", "iPhone-16-Pro-Max" and "iPhone16ProMax" are one device
+    return "".join(ch for ch in text if ch.isalnum()).casefold()
+
+
 def group_screenshots(screenshots: list[Path]) -> dict[str, list[Path]]:
     grouped: dict[str, list[Path]] = {}
     for screenshot in screenshots:
+        stem = compact_name(screenshot.stem)
         display_type = next(
-            (value for prefix, value in DISPLAY_TYPES.items() if prefix in screenshot.stem),
+            (value for prefix, value in DISPLAY_TYPES.items() if compact_name(prefix) in stem),
             None,
         )
         if display_type:

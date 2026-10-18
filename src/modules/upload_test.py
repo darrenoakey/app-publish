@@ -467,11 +467,14 @@ def test_screenshot_parsing_grouping_and_actions_are_deterministic(
         "iPad Pro 13-inch-01.png",
         "iPad-Pro-11-inch-01.png",
         "unrecognized.png",
+        "iPhone16ProMax-03-rules.png",
+        "iPadPro12.9-01-board.png",
     ]
     files = [tmp_path / name for name in names]
     grouped = group_screenshots(files)
-    assert grouped["APP_IPHONE_67"] == files[:2]
-    assert grouped["APP_IPAD_PRO_3GEN_129"] == [files[2]]
+    # compact fastlane-style names must group with the spaced/hyphenated forms
+    assert grouped["APP_IPHONE_67"] == files[:2] + [files[5]]
+    assert grouped["APP_IPAD_PRO_3GEN_129"] == [files[2], files[6]]
     assert grouped["APP_IPAD_PRO_3GEN_11"] == [files[3]]
 
     actions = screenshot_actions(files[:2], parsed["APP_IPHONE_67"])
