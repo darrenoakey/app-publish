@@ -57,6 +57,7 @@ DISPLAY_TYPES = {
     "iPhone-16-Plus": "APP_IPHONE_67",
     "iPad Pro 13-inch": "APP_IPAD_PRO_3GEN_129",
     "iPad-Pro-13-inch": "APP_IPAD_PRO_3GEN_129",
+    "iPad Pro 12.9": "APP_IPAD_PRO_3GEN_129",
     "iPad Pro 11-inch": "APP_IPAD_PRO_3GEN_11",
     "iPad-Pro-11-inch": "APP_IPAD_PRO_3GEN_11",
 }
@@ -669,11 +670,17 @@ def upload_screenshot(token: str, screenshot_set_id: str, filepath: Path) -> boo
     return response_succeeded(execute_plan(screenshot_commit(resource), token))
 
 
+def compact_name(text: str) -> str:
+    # "iPhone 16 Pro Max", "iPhone-16-Pro-Max" and "iPhone16ProMax" are one device
+    return "".join(ch for ch in text if ch.isalnum()).casefold()
+
+
 def group_screenshots(screenshots: list[Path]) -> dict[str, list[Path]]:
     grouped: dict[str, list[Path]] = {}
     for screenshot in screenshots:
+        stem = compact_name(screenshot.stem)
         display_type = next(
-            (value for prefix, value in DISPLAY_TYPES.items() if prefix in screenshot.stem),
+            (value for prefix, value in DISPLAY_TYPES.items() if compact_name(prefix) in stem),
             None,
         )
         if display_type:
@@ -752,10 +759,23 @@ def age_rating_attributes() -> dict[str, Any]:
         "violenceRealistic",
         "violenceRealisticProlongedGraphicOrSadistic",
     )
+    # App Store Connect's 2025 age-rating questionnaire rejects a PATCH
+    # that omits any of the newer boolean/enum questions, so declare all of
+    # them explicitly as the "none / not applicable" answers
     return {
         **dict.fromkeys(descriptors, "NONE"),
         "gambling": False,
         "unrestrictedWebAccess": False,
+        "advertising": False,
+        "gunsOrOtherWeapons": "NONE",
+        "healthOrWellnessTopics": False,
+        "lootBox": False,
+        "messagingAndChat": False,
+        "parentalControls": False,
+        "ageAssurance": False,
+        "socialMedia": False,
+        "socialMediaAgeRestricted": False,
+        "userGeneratedContent": False,
     }
 
 
@@ -791,7 +811,12 @@ def categories_payload(app_info_id: str, primary: str, secondary: str | None = N
     relationships = {"primaryCategory": {"data": relationship("appCategories", primary_id)}}
     secondary_id = get_category_id("", secondary) if secondary else None
     if secondary_id:
-        relationships["secondaryCategory"] = {"data": relationship("appCategories", secondary_id)}
+        # a subcategory of the primary (GAMES -> GAMES_CARD) is a
+        # primarySubcategoryOne; ASC rejects it as a secondaryCategory
+        if secondary_id.startswith(primary_id + "_"):
+            relationships["primarySubcategoryOne"] = {"data": relationship("appCategories", secondary_id)}
+        else:
+            relationships["secondaryCategory"] = {"data": relationship("appCategories", secondary_id)}
     return resource_payload("appInfos", app_info_id, relationships=relationships)
 
 
@@ -836,9 +861,17 @@ def related_price_endpoint(price: dict) -> str | None:
     return link.removeprefix(f"{API_BASE_URL}/") if link else None
 
 
+def same_price(customer_price: Any, price_usd: str) -> bool:
+    # ASC returns "0.0" for the free tier while callers write "0.00"
+    try:
+        return float(customer_price) == float(price_usd)
+    except (TypeError, ValueError):
+        return False
+
+
 def find_price_point(response: dict | None, price_usd: str) -> str | None:
     for resource in (response or {}).get("data", []):
-        if resource.get("attributes", {}).get("customerPrice") == price_usd:
+        if same_price(resource.get("attributes", {}).get("customerPrice"), price_usd):
             return resource.get("id")
     return None
 
@@ -870,7 +903,7 @@ def set_pricing(token: str, app_id: str, price_usd: str = "4.99") -> bool:
         endpoint = related_price_endpoint(price)
         if endpoint:
             current = first_data(api_request("GET", endpoint, token))
-            if current and current.get("attributes", {}).get("customerPrice") == price_usd:
+            if current and same_price(current.get("attributes", {}).get("customerPrice"), price_usd):
                 return True
     points = api_request("GET", f"apps/{app_id}/appPricePoints?filter[territory]=USA&limit=200", token)
     point_id = find_price_point(points, price_usd)

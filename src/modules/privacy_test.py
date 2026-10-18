@@ -10,15 +10,28 @@ from notices import PostgresNoticeStore, TEST_NOTICE_DSN
 from session import IrisClient, ListedCookieSource
 from state import ProjectState
 
-from modules.privacy import not_collected_body, publish_not_collected, run
+from modules.privacy import not_collected_body, publish_not_collected, publish_state_body, run
 
 
 class PrivacyHandler(BaseHTTPRequestHandler):
     status = 201
     requests: list[tuple[str, bytes]] = []
+    existing_usages = False
 
     def log_message(self, message_format: str, *args: object) -> None:
         del message_format, args
+
+    def do_GET(self) -> None:
+        self.requests.append((self.path, b""))
+        raw = b'{"data":[{"id":"usage-0"}]}' if self.existing_usages else b'{"data":[]}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_PATCH(self) -> None:
+        self.do_POST()
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
@@ -55,9 +68,38 @@ def test_publish_not_collected_posts_iris_payload() -> None:
         server.shutdown()
         server.server_close()
         thread.join()
-    path, body = PrivacyHandler.requests[0]
-    assert path == "/v1/appDataUsages"
-    assert json.loads(body) == not_collected_body("1523241431")
+    paths = [path for path, _ in PrivacyHandler.requests]
+    assert paths == [
+        "/v1/apps/1523241431/dataUsages?limit=1",
+        "/v1/appDataUsages",
+        "/v1/appDataUsagesPublishState/1523241431",
+    ]
+    assert json.loads(PrivacyHandler.requests[1][1]) == not_collected_body("1523241431")
+    assert json.loads(PrivacyHandler.requests[2][1]) == publish_state_body("1523241431")
+
+
+def test_publish_not_collected_reuses_existing_usage_and_publishes() -> None:
+    PrivacyHandler.status = 200
+    PrivacyHandler.requests = []
+    PrivacyHandler.existing_usages = True
+    server = ThreadingHTTPServer(("127.0.0.1", 0), PrivacyHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        iris = IrisClient(
+            ListedCookieSource([{"name": "myacinfo", "value": "abc"}]),
+            base_url=f"http://127.0.0.1:{server.server_address[1]}/",
+        )
+        publish_not_collected(iris, "1523241431")
+    finally:
+        PrivacyHandler.existing_usages = False
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert [path for path, _ in PrivacyHandler.requests] == [
+        "/v1/apps/1523241431/dataUsages?limit=1",
+        "/v1/appDataUsagesPublishState/1523241431",
+    ]
 
 
 def test_run_notifies_when_chrome_session_expired(tmp_path: Path) -> None:

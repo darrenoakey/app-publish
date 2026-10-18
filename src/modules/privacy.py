@@ -32,10 +32,29 @@ def not_collected_body(app_id: str) -> dict:
 # ##################################################################
 # publish not collected
 # POST iris /v1/appDataUsages for this app id
+def publish_state_body(app_id: str) -> dict:
+    return {
+        "data": {
+            "type": "appDataUsagesPublishState",
+            "id": app_id,
+            "attributes": {"published": True},
+        }
+    }
+
+
 def publish_not_collected(iris: IrisClient, app_id: str) -> dict:
     if not app_id:
         raise ValueError("publish_not_collected requires an app id")
-    return iris.request("POST", "v1/appDataUsages", json_body=not_collected_body(app_id))
+    existing = iris.request("GET", f"v1/apps/{app_id}/dataUsages?limit=1")
+    if not existing.get("data"):
+        iris.request("POST", "v1/appDataUsages", json_body=not_collected_body(app_id))
+    # creating the usage only drafts the answers; review submission requires
+    # the publish state to be flipped, exactly as the "Publish" button does
+    return iris.request(
+        "PATCH",
+        f"v1/appDataUsagesPublishState/{app_id}",
+        json_body=publish_state_body(app_id),
+    )
 
 
 # ##################################################################
