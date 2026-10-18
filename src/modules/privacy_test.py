@@ -78,7 +78,7 @@ def test_publish_not_collected_posts_iris_payload() -> None:
     assert json.loads(PrivacyHandler.requests[2][1]) == publish_state_body("1523241431")
 
 
-def test_publish_not_collected_skips_duplicate_usage_but_still_publishes() -> None:
+def test_publish_not_collected_reuses_existing_usage_and_publishes() -> None:
     PrivacyHandler.status = 200
     PrivacyHandler.requests = []
     PrivacyHandler.existing_usages = True
