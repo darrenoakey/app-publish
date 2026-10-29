@@ -24,6 +24,10 @@ RENEWAL_WINDOW = dt.timedelta(days=30)
 class ApplePortalError(RuntimeError):
     """A provisioning request failed or returned inconsistent data."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 @dataclass(frozen=True)
 class SigningIdentity:
@@ -87,7 +91,10 @@ def request(
             detail = "; ".join(str(item.get("detail") or item.get("title")) for item in errors)
         except (ValueError, AttributeError):
             detail = response.text[:500]
-        raise ApplePortalError(f"App Store Connect {method} {path} failed ({response.status_code}): {detail}")
+        raise ApplePortalError(
+            f"App Store Connect {method} {path} failed ({response.status_code}): {detail}",
+            status_code=response.status_code,
+        )
     return response.json()
 
 
@@ -205,7 +212,12 @@ def _profile_is_current(item: dict, certificate_id: str, profile_type: str) -> b
     expiration = dt.datetime.fromisoformat(str(attributes["expirationDate"]).replace("Z", "+00:00"))
     if expiration <= dt.datetime.now(tz=dt.UTC) + RENEWAL_WINDOW:
         return False
-    return certificate_id in _profile_certificate_ids(str(item["id"]))
+    try:
+        return certificate_id in _profile_certificate_ids(str(item["id"]))
+    except ApplePortalError as error:
+        if error.status_code != 404:
+            raise
+        return False
 
 
 def _device_relationship(udids: list[str]) -> list[dict[str, str]]:

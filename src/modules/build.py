@@ -128,6 +128,50 @@ def find_scheme(project_path: Path, state: ProjectState) -> str:
 
 
 # ##################################################################
+# archive command
+# keep archive compilation in persistent project-local derived data
+# while retaining the existing unsigned archive and signing settings
+def archive_command(
+    project_path: Path,
+    xcode_project: str,
+    scheme: str,
+    archive_path: Path,
+    state: ProjectState,
+    *,
+    use_workspace: bool,
+) -> list[str]:
+    derived_data_path = project_path / "local" / "appstore-derived-data"
+    ensure_dir(derived_data_path)
+    command = ["xcodebuild"]
+    if use_workspace:
+        command.extend(["-workspace", xcode_project])
+    else:
+        command.extend(["-project", xcode_project])
+    command.extend(
+        [
+            "-derivedDataPath",
+            str(derived_data_path),
+            "-scheme",
+            scheme,
+            "-configuration",
+            "Release",
+            "-archivePath",
+            str(archive_path),
+            "-destination",
+            "generic/platform=iOS",
+            "CURRENT_PROJECT_VERSION=" + str(state.current_build),
+            f"MARKETING_VERSION={state.current_version}",
+            f"DEVELOPMENT_TEAM={TEAM_ID}",
+            f"PRODUCT_BUNDLE_IDENTIFIER={state.bundle_id}",
+            "CODE_SIGNING_ALLOWED=NO",
+            "CODE_SIGNING_REQUIRED=NO",
+            "archive",
+        ]
+    )
+    return command
+
+
+# ##################################################################
 # build archive
 # build and archive the app
 def build_archive(project_path: Path, state: ProjectState) -> bool:
@@ -164,34 +208,14 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
     state.current_build += 1
     print_info(f"Build number: {state.current_build}")
 
-    # archive
     print_info("Creating archive...")
-    archive_cmd = ["xcodebuild"]
-    if use_workspace:
-        archive_cmd.extend(["-workspace", xcode_project])
-    else:
-        archive_cmd.extend(["-project", xcode_project])
-
-    # Build unsigned. The finished bundle is provisioned and signed below by
-    # rcodesign with the P12 supplied through an anonymous pipe.
-    archive_cmd.extend(
-        [
-            "-scheme",
-            scheme,
-            "-configuration",
-            "Release",
-            "-archivePath",
-            str(archive_path),
-            "-destination",
-            "generic/platform=iOS",
-            "CURRENT_PROJECT_VERSION=" + str(state.current_build),
-            f"MARKETING_VERSION={state.current_version}",
-            f"DEVELOPMENT_TEAM={TEAM_ID}",
-            f"PRODUCT_BUNDLE_IDENTIFIER={state.bundle_id}",
-            "CODE_SIGNING_ALLOWED=NO",
-            "CODE_SIGNING_REQUIRED=NO",
-            "archive",
-        ]
+    archive_cmd = archive_command(
+        project_path,
+        xcode_project,
+        scheme,
+        archive_path,
+        state,
+        use_workspace=bool(use_workspace),
     )
 
     ret_code, output = exec_cmd(archive_cmd, timeout=600)

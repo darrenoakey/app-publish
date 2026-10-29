@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from modules.build import (
+    archive_command,
     build_archive,
     create_ipa_manually,
     find_scheme,
@@ -24,6 +25,36 @@ def test_sync_web_content_fails_when_capacitor_sync_fails(tmp_path: Path) -> Non
     command_directory.mkdir(parents=True)
     (command_directory / "cap").symlink_to("/usr/bin/true")
     assert sync_web_content(tmp_path) is True
+
+
+def test_archive_command_uses_persistent_project_local_derived_data(tmp_path: Path) -> None:
+    state = ProjectState(
+        project_name="Reader",
+        current_build=7,
+        current_version="2.3.4",
+        bundle_id="com.darrenoakey.reader",
+    )
+    archive_path = tmp_path / "build" / "Reader.xcarchive"
+    derived_data_path = tmp_path / "local" / "appstore-derived-data"
+    command = archive_command(
+        tmp_path,
+        str(tmp_path / "Reader.xcodeproj"),
+        "Reader",
+        archive_path,
+        state,
+        use_workspace=False,
+    )
+
+    assert derived_data_path.is_dir()
+    assert command[command.index("-derivedDataPath") + 1] == str(derived_data_path)
+    assert command[command.index("-archivePath") + 1] == str(archive_path)
+    assert command[command.index("-project") + 1] == str(tmp_path / "Reader.xcodeproj")
+    assert "CURRENT_PROJECT_VERSION=7" in command
+    assert "MARKETING_VERSION=2.3.4" in command
+    assert "PRODUCT_BUNDLE_IDENTIFIER=com.darrenoakey.reader" in command
+    assert "CODE_SIGNING_ALLOWED=NO" in command
+    assert "CODE_SIGNING_REQUIRED=NO" in command
+    assert command[-1] == "archive"
 
 
 def test_xcode_discovery_covers_all_project_layouts(tmp_path: Path) -> None:

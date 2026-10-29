@@ -38,3 +38,5 @@ Diagnose with `greenline status` and `greenline doctor` (`--fix` to reconcile).
 - When the ASC API returns `UNEXPECTED_ERROR` on submit but the version shows `READY_FOR_REVIEW`, PATCH the populated `reviewSubmissions/<id>` with `submitted: true` directly; empty earlier draft submissions cannot be cancelled or deleted via the API.
 - `web_driver.login_status` for ASC reports `logged_in: False` on a stale tab; navigate to `appstoreconnect.apple.com/apps` first before trusting it.
 - Each ASC step takes 30-120 s of real API time. Run every step detached with a sleep; chaining several in one turn blows the 10-minute turn limit.
+- App Store Connect can list an ACTIVE profile whose detail and certificate relationship both return 404. Treat only that structured 404 as a stale candidate; propagate every other API error.
+- Archives must pass `-derivedDataPath <project>/local/appstore-derived-data`; the shared Xcode DerivedData tree can disappear during fleet builds, while project-local `local/` storage persists and stays gitignored.

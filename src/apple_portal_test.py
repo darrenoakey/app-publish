@@ -72,6 +72,20 @@ def test_real_apple_api_profile_certificate_and_device_flow() -> None:
     assert devices[0]["type"] == "devices"
 
 
+def test_listed_but_inaccessible_profile_is_stale() -> None:
+    bundles = apple_portal.request(
+        "GET",
+        "bundleIds",
+        params={"filter[identifier]": "darrenoakey.mcCompass", "limit": 2},
+    )
+    bundle_id = bundles["data"][0]["id"]
+    profiles = apple_portal.request("GET", f"bundleIds/{bundle_id}/profiles", params={"limit": 200})["data"]
+    stale_profile = next(item for item in profiles if item["id"] == "525NZ4628H")
+    assert stale_profile["attributes"]["profileState"] == "ACTIVE"
+    assert stale_profile["attributes"]["profileType"] == "IOS_APP_STORE"
+    assert not apple_portal._profile_is_current(stale_profile, "unresolvable-certificate", "IOS_APP_STORE")
+
+
 def test_invalid_local_and_remote_material_fails_closed() -> None:
     with pytest.raises(apple_portal.ApplePortalError):
         apple_portal._required_text("does-not-exist")
@@ -79,5 +93,6 @@ def test_invalid_local_and_remote_material_fails_closed() -> None:
         apple_portal._load_p12(b"not a p12")
     with pytest.raises(apple_portal.ApplePortalError):
         apple_portal._device_relationship(["NOT-A-REGISTERED-DEVICE"])
-    with pytest.raises(apple_portal.ApplePortalError):
+    with pytest.raises(apple_portal.ApplePortalError) as exc_info:
         apple_portal.request("GET", "definitely-not-an-apple-resource")
+    assert exc_info.value.status_code == 404
