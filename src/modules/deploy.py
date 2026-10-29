@@ -15,7 +15,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import TEAM_ID
-from modules.signing import sign_app_bundle
+import apple_portal
+from modules.signing import requested_entitlements, sign_app_bundle
 from state import ProjectState, load_state
 from utils import (
     capacitor_sync,
@@ -271,6 +272,17 @@ def build_for_device(
         return None
 
     # Find the app bundle - try exact path first
+    try:
+        requested = requested_entitlements(
+            str(xcodeproj),
+            scheme,
+            "Debug",
+            use_workspace=False,
+        )
+    except apple_portal.ApplePortalError as error:
+        print_error(f"Source entitlement resolution failed: {error}")
+        return None
+
     app_name = f"{scheme}.app"
     app_path = build_dir / "Build" / "Products" / "Debug-iphoneos" / app_name
     if app_path.exists():
@@ -282,6 +294,7 @@ def build_for_device(
                 scheme,
                 "IOS_APP_ADHOC",
                 device_udids=[device_udid],
+                requested=requested,
             )
             else None
         )
@@ -297,6 +310,7 @@ def build_for_device(
                     scheme,
                     "IOS_APP_ADHOC",
                     device_udids=[device_udid],
+                    requested=requested,
                 )
                 else None
             )

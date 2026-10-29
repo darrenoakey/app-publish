@@ -6,7 +6,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState, load_state, save_state
 from config import TEAM_ID
-from modules.signing import sign_app_bundle
+import apple_portal
+from modules.signing import requested_entitlements, sign_app_bundle
 from utils import (
     capacitor_sync,
     print_info,
@@ -237,11 +238,22 @@ def build_archive(project_path: Path, state: ProjectState) -> bool:
         print_error(f"Expected one app bundle in archive, found {len(app_bundles)}")
         return False
     app_name = state.metadata.get("app_name") or state.project_name
+    try:
+        requested = requested_entitlements(
+            xcode_project,
+            scheme,
+            "Release",
+            use_workspace=bool(use_workspace),
+        )
+    except apple_portal.ApplePortalError as error:
+        print_error(f"Source entitlement resolution failed: {error}")
+        return False
     if not sign_app_bundle(
         app_bundles[0],
         state.bundle_id,
         app_name,
         "IOS_APP_STORE",
+        requested=requested,
     ):
         return False
 

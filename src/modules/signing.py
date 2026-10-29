@@ -1,7 +1,9 @@
 """Provision and apply Apple signatures without using macOS Keychain."""
 
 from pathlib import Path
+import json
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -64,7 +66,96 @@ def _rcodesign_binary() -> str:
     raise apple_portal.ApplePortalError("rcodesign is not installed; install the apple-codesign package")
 
 
-def _profile_entitlements(profile: bytes) -> bytes:
+_SIGNING_IDENTITY_ENTITLEMENTS = frozenset(
+    {
+        "application-identifier",
+        "beta-reports-active",
+        "com.apple.developer.team-identifier",
+        "get-task-allow",
+        "keychain-access-groups",
+    }
+)
+
+
+_PREFIX_WILDCARD_ENTITLEMENTS = frozenset(
+    {
+        "application-identifier",
+        "com.apple.developer.icloud-container-identifiers",
+        "com.apple.developer.ubiquity-container-identifiers",
+        "com.apple.developer.ubiquity-kvstore-identifier",
+        "keychain-access-groups",
+    }
+)
+_BUILD_VARIABLE = re.compile(r"\$\(([^)]+)\)|\$\{([^}]+)\}")
+_PROFILE_VARIABLES = {"AppIdentifierPrefix", "TeamIdentifierPrefix"}
+
+
+def _profile_prefix(document: dict, name: str) -> str:
+    field = "ApplicationIdentifierPrefix" if name == "AppIdentifierPrefix" else "TeamIdentifier"
+    values = document.get(field, [])
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], str) or not values[0]:
+        raise apple_portal.ApplePortalError(f"provisioning profile has no unambiguous {name}")
+    return values[0].rstrip(".") + "."
+
+
+def _resolve_profile_variables(value, document: dict):
+    if isinstance(value, list):
+        return [_resolve_profile_variables(item, document) for item in value]
+    if isinstance(value, dict):
+        return {key: _resolve_profile_variables(item, document) for key, item in value.items()}
+    if not isinstance(value, str):
+        return value
+    resolved = value
+    for name in _PROFILE_VARIABLES:
+        for macro in (f"$({name})", f"${{{name}}}"):
+            if macro in resolved:
+                resolved = resolved.replace(macro, _profile_prefix(document, name))
+    if _BUILD_VARIABLE.search(resolved):
+        raise apple_portal.ApplePortalError(f"requested entitlement has an unresolved variable: {value}")
+    return resolved
+
+
+def _value_authorized(key: str, requested, authorized) -> bool:
+    if isinstance(requested, list):
+        return isinstance(authorized, list) and all(
+            any(_value_authorized(key, requested_item, authorized_item) for authorized_item in authorized)
+            for requested_item in requested
+        )
+    if not isinstance(requested, str):
+        return type(requested) is type(authorized) and requested == authorized
+    if not isinstance(authorized, str):
+        return False
+    if requested == authorized:
+        return True
+    if key == "com.apple.developer.associated-domains" and authorized == "*":
+        return True
+    return (
+        key in _PREFIX_WILDCARD_ENTITLEMENTS
+        and authorized.endswith("*")
+        and "*" not in requested
+        and requested.startswith(authorized[:-1])
+    )
+
+
+def _select_entitlements(profile: dict, requested: dict, document: dict | None = None) -> dict:
+    resolved = _resolve_profile_variables(requested, document or {})
+    unauthorized = sorted(
+        key for key, value in resolved.items() if key not in profile or not _value_authorized(key, value, profile[key])
+    )
+    if unauthorized:
+        raise apple_portal.ApplePortalError(
+            "provisioning profile does not authorize requested entitlements: " + ", ".join(unauthorized)
+        )
+    selected = {
+        key: value for key, value in profile.items() if key in _SIGNING_IDENTITY_ENTITLEMENTS and key not in resolved
+    }
+    selected.update(resolved)
+    return selected
+
+
+def _profile_entitlements(profile: bytes, requested: dict | None = None) -> bytes:
     decoded = subprocess.run(
         [
             "/usr/bin/openssl",
@@ -86,7 +177,110 @@ def _profile_entitlements(profile: bytes) -> bytes:
     entitlements = document.get("Entitlements")
     if not isinstance(entitlements, dict):
         raise apple_portal.ApplePortalError("provisioning profile has no entitlements dictionary")
-    return plistlib.dumps(entitlements, fmt=plistlib.FMT_XML)
+    selected = _select_entitlements(entitlements, requested or {}, document)
+    return plistlib.dumps(selected, fmt=plistlib.FMT_XML)
+
+
+def _resolve_build_variables(value, settings: dict):
+    if isinstance(value, list):
+        return [_resolve_build_variables(item, settings) for item in value]
+    if isinstance(value, dict):
+        return {key: _resolve_build_variables(item, settings) for key, item in value.items()}
+    if not isinstance(value, str):
+        return value
+
+    def replace(match: re.Match) -> str:
+        name = match.group(1) or match.group(2)
+        if name in _PROFILE_VARIABLES:
+            return match.group(0)
+        replacement = settings.get(name)
+        if not isinstance(replacement, (str, int, float)):
+            raise apple_portal.ApplePortalError(f"Xcode did not resolve entitlement variable {name}: {value}")
+        return str(replacement)
+
+    return _BUILD_VARIABLE.sub(replace, value)
+
+
+def _read_requested_entitlements(settings: dict, source_root: Path) -> dict:
+    entitlements_setting = settings.get("CODE_SIGN_ENTITLEMENTS", "").strip()
+    if not entitlements_setting:
+        return {}
+    target_root = Path(settings.get("SRCROOT") or settings.get("PROJECT_DIR") or source_root)
+    if not target_root.is_absolute():
+        target_root = source_root / target_root
+    expanded = entitlements_setting.replace("$(SRCROOT)", str(target_root)).replace("${SRCROOT}", str(target_root))
+    expanded = expanded.replace("$(PROJECT_DIR)", str(target_root)).replace("${PROJECT_DIR}", str(target_root))
+    entitlements_path = Path(expanded)
+    if not entitlements_path.is_absolute():
+        entitlements_path = target_root / entitlements_path
+    try:
+        requested = plistlib.loads(entitlements_path.read_bytes())
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise apple_portal.ApplePortalError(
+            f"could not read requested entitlements from {entitlements_path}: {error}"
+        ) from error
+    if not isinstance(requested, dict):
+        raise apple_portal.ApplePortalError(f"requested entitlements are not a dictionary: {entitlements_path}")
+    return _resolve_build_variables(requested, settings)
+
+
+def _decode_build_settings(output: str) -> list:
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\[", output):
+        try:
+            documents, end = decoder.raw_decode(output[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(documents, list) and not output[match.start() + end :].strip():
+            return documents
+    raise apple_portal.ApplePortalError("xcodebuild returned unreadable build settings")
+
+
+def requested_entitlements(
+    xcode_project: str,
+    scheme: str,
+    configuration: str,
+    *,
+    use_workspace: bool,
+) -> dict[str, dict]:
+    command = ["xcodebuild", "-workspace" if use_workspace else "-project", xcode_project]
+    if use_workspace:
+        command.extend(["-scheme", scheme])
+    else:
+        command.append("-alltargets")
+    command.extend(
+        [
+            "-configuration",
+            configuration,
+            "-showBuildSettings",
+            "-json",
+        ]
+    )
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise apple_portal.ApplePortalError(f"could not resolve source entitlements: {detail}")
+    documents = _decode_build_settings(completed.stdout)
+    source_root = Path(xcode_project).resolve().parent
+    requested_by_bundle: dict[str, dict] = {}
+    for item in documents:
+        settings = item.get("buildSettings", {})
+        identifier = settings.get("PRODUCT_BUNDLE_IDENTIFIER")
+        if not identifier:
+            continue
+        requested = _read_requested_entitlements(settings, source_root)
+        if identifier in requested_by_bundle and requested_by_bundle[identifier] != requested:
+            raise apple_portal.ApplePortalError(f"conflicting Xcode entitlements for bundle identifier {identifier}")
+        requested_by_bundle[identifier] = requested
+    if not requested_by_bundle:
+        raise apple_portal.ApplePortalError("Xcode returned no targets with bundle identifiers")
+    return requested_by_bundle
 
 
 def sign_app_bundle(
@@ -96,9 +290,12 @@ def sign_app_bundle(
     profile_type: str,
     *,
     device_udids: list[str] | None = None,
+    requested: dict[str, dict] | None = None,
 ) -> bool:
     """Embed a current profile and recursively sign with an in-memory P12."""
     try:
+        if requested is None:
+            raise apple_portal.ApplePortalError("per-bundle requested entitlements are required")
         identity = apple_portal.ensure_distribution_identity()
         bundles = [(app_bundle, bundle_id, "main")]
         nested = sorted(
@@ -122,13 +319,15 @@ def sign_app_bundle(
 
         entitlements_by_scope: list[tuple[str, bytes]] = []
         for bundle, identifier, scope in bundles:
+            if identifier not in requested:
+                raise apple_portal.ApplePortalError(f"no requested entitlements resolved for bundle {identifier}")
             profile = apple_portal.ensure_profile(
                 identifier,
                 f"{app_name} {bundle.stem}",
                 profile_type,
                 device_udids=device_udids,
             )
-            entitlements_by_scope.append((scope, _profile_entitlements(profile)))
+            entitlements_by_scope.append((scope, _profile_entitlements(profile, requested[identifier])))
             embedded_profile = bundle / "embedded.mobileprovision"
             embedded_profile.write_bytes(profile)
             embedded_profile.chmod(0o644)
