@@ -7,6 +7,7 @@ from threading import Thread
 import pytest
 
 from modules.upload import (
+    released_before,
     API_BASE_URL,
     APP_INFO_FIELDS,
     REVIEW_FIELDS,
@@ -581,3 +582,14 @@ def test_local_normalization_defaults_and_altool_command(tmp_path: Path) -> None
     assert command[-2] == "--apiIssuer"
     assert main([]) == 1
     assert main([str(tmp_path)]) == 1
+
+
+def test_whats_new_only_after_a_store_release() -> None:
+    def versions(*states: str) -> dict:
+        return {"data": [{"attributes": {"appStoreState": state}} for state in states]}
+
+    assert released_before(None) is False
+    assert released_before(versions("PREPARE_FOR_SUBMISSION")) is False
+    assert released_before(versions("DEVELOPER_REJECTED", "WAITING_FOR_REVIEW")) is False
+    assert released_before(versions("PREPARE_FOR_SUBMISSION", "READY_FOR_SALE")) is True
+    assert released_before(versions("REPLACED_WITH_NEW_VERSION")) is True

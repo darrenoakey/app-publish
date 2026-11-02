@@ -560,19 +560,42 @@ def upload_metadata_for_locale(
         return False
     updates = metadata_updates(metadata_dir, VERSION_FIELDS, version.get("attributes", {}))
     current_news = version.get("attributes", {}).get("whatsNew", "") or ""
-    if not current_news or current_news == "Bug fixes and performance improvements.":
+    # Apple rejects whatsNew on an app's first release ("cannot be edited at this time") and
+    # rejects the whole PATCH with it, dropping the description and keywords too.
+    first_release = not released_before(execute_plan(plan_get_versions(app_id), token))
+    if not first_release and (not current_news or current_news == "Bug fixes and performance improvements."):
         commits = get_commits_since_release(project_path)
         updates["whatsNew"] = (
             generate_whats_new(commits, state.app_name) if commits else "• Bug fixes and performance improvements"
         )
     if updates and not update_version_localization(token, version["id"], updates):
-        print_warning("Failed to update version metadata")
+        print_error(f"Failed to update version metadata for {locale}")
+        return False
     app_info = get_app_info_localization(token, app_id, locale)
     if app_info:
         updates = metadata_updates(metadata_dir, APP_INFO_FIELDS, app_info.get("attributes", {}))
         if updates and not update_app_info_localization(token, app_info["id"], updates):
-            print_warning("Failed to update app info")
+            print_error(f"Failed to update app info for {locale}")
+            return False
     return True
+
+
+RELEASED_STATES = {
+    "READY_FOR_SALE",
+    "READY_FOR_DISTRIBUTION",
+    "REPLACED_WITH_NEW_VERSION",
+    "REMOVED_FROM_SALE",
+    "DEVELOPER_REMOVED_FROM_SALE",
+}
+
+
+# ##################################################################
+# released before
+# true once any version of the app has reached the store; whatsNew is only editable then
+def released_before(versions: dict | None) -> bool:
+    return any(
+        item.get("attributes", {}).get("appStoreState") in RELEASED_STATES for item in (versions or {}).get("data", [])
+    )
 
 
 def parse_screenshot_sets(set_response: dict | None, screenshot_responses: dict[str, dict | None]) -> dict:
