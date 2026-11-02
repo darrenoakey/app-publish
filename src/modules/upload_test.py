@@ -477,6 +477,9 @@ def test_screenshot_parsing_grouping_and_actions_are_deterministic(
     assert grouped["APP_IPAD_PRO_3GEN_129"] == [files[2], files[6]]
     assert grouped["APP_IPAD_PRO_3GEN_11"] == [files[3]]
 
+    duo = [tmp_path / "iPhone Duo-01-board.png", tmp_path / "iPhone-Duo-02-title.png", tmp_path / "iPhoneDuo-03.png"]
+    assert group_screenshots(duo) == {"APP_IPHONE_DUO": duo}
+
     actions = screenshot_actions(files[:2], parsed["APP_IPHONE_67"])
     assert actions == {
         "set_id": "set-phone",

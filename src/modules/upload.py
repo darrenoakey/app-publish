@@ -60,6 +60,9 @@ DISPLAY_TYPES = {
     "iPad Pro 12.9": "APP_IPAD_PRO_3GEN_129",
     "iPad Pro 11-inch": "APP_IPAD_PRO_3GEN_11",
     "iPad-Pro-11-inch": "APP_IPAD_PRO_3GEN_11",
+    # iPhone Duo (foldable) has its own App Store screenshot set
+    "iPhone Duo": "APP_IPHONE_DUO",
+    "iPhone-Duo": "APP_IPHONE_DUO",
 }
 CATEGORY_IDS = {
     "Games": "GAMES",
