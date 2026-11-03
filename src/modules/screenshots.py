@@ -1,4 +1,5 @@
 from pathlib import Path
+from modules.device_guard import assert_test_destination
 import hashlib
 
 import sys
@@ -897,6 +898,7 @@ def run_ui_tests_for_screenshots(project_path: Path, state: ProjectState, target
 
     for device_name, display_type in devices:
         print_info(f"  Testing on {device_name}...")
+        assert_test_destination(f"platform=iOS Simulator,name={device_name}")
 
         # Run xcodebuild test
         ret_code, output = exec_cmd(

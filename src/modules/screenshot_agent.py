@@ -1,6 +1,7 @@
 import json
 from threading import Event
 from pathlib import Path
+from modules.device_guard import assert_release_only
 
 import sys
 
@@ -282,6 +283,7 @@ def capture_device_screenshots(
     output_dir: Path,
 ) -> int:
     device_name = device["name"]
+    assert_release_only([f"platform=iOS Simulator,name={device_name}"], "screenshot")
     suffix = device["suffix"]
     captured = 0
 

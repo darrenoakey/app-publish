@@ -18,6 +18,7 @@ from config import TEAM_ID
 import apple_portal
 from modules.signing import requested_entitlements, sign_app_bundle
 from state import ProjectState, load_state
+from modules.device_guard import RELEASE, assert_release_only
 from utils import (
     capacitor_sync,
     print_info,
@@ -358,6 +359,8 @@ def install_on_device(app_path: str, device_id: str | None = None) -> bool:
 # deploys app to connected ios device
 # device_name: name of device to deploy to (default: "Starbuck")
 def run(project_path: Path, state: ProjectState, device_name: str = "Starbuck") -> bool:
+    # Starbuck is the owner's working iPhone: install/launch of a release build only.
+    assert_release_only([device_name], RELEASE)
     print_info(f"Looking for device: {device_name}")
     print_info("Checking for connected iOS devices...")
 

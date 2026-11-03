@@ -15,6 +15,7 @@ from utils import (
 )
 from state import load_state, save_state
 from modules.screenshots import analyze_screenshot_scenarios
+from modules.device_guard import assert_release_only
 
 # Required device screenshots
 DEVICES = [
@@ -114,6 +115,7 @@ def click_simulator(device_name: str, x: int, y: int) -> bool:
 # capture a specific scenario on a device
 def capture_scenario(device: dict, scenario: dict, screenshot_dir: Path, bundle_id: str, app_path: Path) -> bool:
     device_name = device["name"]
+    assert_release_only([f"platform=iOS Simulator,name={device_name}"], "screenshot")
     suffix = device["suffix"]
     scenario_name = scenario["name"]
     description = scenario.get("description", scenario_name)
