@@ -111,6 +111,16 @@ def command_watch(args: argparse.Namespace) -> int:
 
 
 # ##################################################################
+# command followthrough
+# GET-only App Store Connect follow-through; exit 2 means new actionable findings
+def command_followthrough(args: argparse.Namespace) -> int:
+    extra = ["--baseline"] if args.baseline else []
+    if args.evidence:
+        extra += ["--evidence", args.evidence]
+    return run_command([sys.executable, str(SCRIPT_DIR / "src" / "followthrough.py"), *extra])
+
+
+# ##################################################################
 # command restart
 # restart pipeline from beginning
 def command_restart(args: argparse.Namespace) -> int:
@@ -239,6 +249,11 @@ def main(argv: list[str]) -> int:
 
     p_watch = sub.add_parser("watch", help="Diff review states and ping Beezle on new rejections")
     p_watch.set_defaults(func=command_watch)
+
+    p_follow = sub.add_parser("followthrough", help="GET-only App Store Connect follow-through with durable dedup")
+    p_follow.add_argument("--baseline", action="store_true", help="Record current findings as known")
+    p_follow.add_argument("--evidence", help="Write full scan evidence JSON to this path")
+    p_follow.set_defaults(func=command_followthrough)
 
     # restart
     p_restart = sub.add_parser("restart", help="Restart pipeline from beginning")

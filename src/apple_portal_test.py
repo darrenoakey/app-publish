@@ -3,6 +3,7 @@
 import base64
 import datetime as dt
 import plistlib
+import uuid
 
 import pytest
 from cryptography import x509
@@ -73,17 +74,21 @@ def test_real_apple_api_profile_certificate_and_device_flow() -> None:
 
 
 def test_listed_but_inaccessible_profile_is_stale() -> None:
-    bundles = apple_portal.request(
-        "GET",
-        "bundleIds",
-        params={"filter[identifier]": "darrenoakey.mcCompass", "limit": 2},
-    )
-    bundle_id = bundles["data"][0]["id"]
-    profiles = apple_portal.request("GET", f"bundleIds/{bundle_id}/profiles", params={"limit": 200})["data"]
-    stale_profile = next(item for item in profiles if item["id"] == "525NZ4628H")
-    assert stale_profile["attributes"]["profileState"] == "ACTIVE"
-    assert stale_profile["attributes"]["profileType"] == "IOS_APP_STORE"
-    assert not apple_portal._profile_is_current(stale_profile, "unresolvable-certificate", "IOS_APP_STORE")
+    # Apple can list an ACTIVE profile whose certificate relationship 404s; the
+    # original ghost profile has since been purged, so a vanished id reproduces
+    # the same live 404 against the real API.
+    ghost_profile = {
+        "id": f"ZZ{uuid.uuid4().hex[:8].upper()}",
+        "attributes": {
+            "profileState": "ACTIVE",
+            "profileType": "IOS_APP_STORE",
+            "expirationDate": (dt.datetime.now(tz=dt.UTC) + dt.timedelta(days=300)).isoformat(),
+        },
+    }
+    with pytest.raises(apple_portal.ApplePortalError) as exc_info:
+        apple_portal._profile_certificate_ids(ghost_profile["id"])
+    assert exc_info.value.status_code == 404
+    assert not apple_portal._profile_is_current(ghost_profile, "unresolvable-certificate", "IOS_APP_STORE")
 
 
 def test_invalid_local_and_remote_material_fails_closed() -> None:
