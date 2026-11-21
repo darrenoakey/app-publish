@@ -112,11 +112,15 @@ def command_watch(args: argparse.Namespace) -> int:
 
 # ##################################################################
 # command followthrough
-# GET-only App Store Connect follow-through; exit 2 means new actionable findings
+# GET-only App Store Connect follow-through; exit 2 means findings await owner delivery
 def command_followthrough(args: argparse.Namespace) -> int:
     extra = ["--baseline"] if args.baseline else []
-    if args.evidence:
-        extra += ["--evidence", args.evidence]
+    for flag, value in (("--evidence", args.evidence), ("--to", args.to), ("--sender", args.sender), ("--receipt", args.receipt)):
+        if value:
+            extra += [flag, value]
+    for flag, values in (("--deliver", args.deliver), ("--ack", args.ack)):
+        for value in values:
+            extra += [flag, value]
     return run_command([sys.executable, str(SCRIPT_DIR / "src" / "followthrough.py"), *extra])
 
 
@@ -253,6 +257,11 @@ def main(argv: list[str]) -> int:
     p_follow = sub.add_parser("followthrough", help="GET-only App Store Connect follow-through with durable dedup")
     p_follow.add_argument("--baseline", action="store_true", help="Record current findings as known")
     p_follow.add_argument("--evidence", help="Write full scan evidence JSON to this path")
+    p_follow.add_argument("--deliver", action="append", default=[], metavar="ID", help="Pending id to deliver once")
+    p_follow.add_argument("--to", help="Owner conversation id for --deliver")
+    p_follow.add_argument("--sender", help="Your live conversation id for --deliver")
+    p_follow.add_argument("--ack", action="append", default=[], metavar="ID", help="Pending id needing no message")
+    p_follow.add_argument("--receipt", help="Why an --ack id needs no owner message")
     p_follow.set_defaults(func=command_followthrough)
 
     # restart
