@@ -132,9 +132,9 @@ def test_adhoc_profile_expansion_reuse_and_forced_reissue() -> None:
     identifier = f"com.darrenoakey.apppublishtest.{uuid.uuid4().hex}"
     kind = "IOS_APP_ADHOC"
     devices = [
-        item for item in apple_portal.request("GET", "devices", params={"limit": 200})["data"]
-        if item["attributes"]["status"] == "ENABLED"
-        and item["attributes"]["deviceClass"] == "IPHONE"
+        item
+        for item in apple_portal.request("GET", "devices", params={"limit": 200})["data"]
+        if item["attributes"]["status"] == "ENABLED" and item["attributes"]["deviceClass"] == "IPHONE"
     ][:2]
     assert len(devices) == 2, "real ad-hoc coverage test requires two registered iPhones"
     first_udid, second_udid = (item["attributes"]["udid"] for item in devices)
