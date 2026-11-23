@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import threading
 from dataclasses import dataclass
 
 import jwt
@@ -69,10 +70,19 @@ def _token() -> str:
     return new_token
 
 
-# One pooled client keeps App Store Connect's TLS connection alive between calls.
-# Each call costs ~0.8s, of which ~0.4s is a fresh handshake, and a scan issues
-# dozens of calls; the pool is thread-safe so concurrent scans share it too.
-_session = requests.Session()
+# One pooled client per thread keeps App Store Connect's TLS connection alive
+# between calls. Each call costs ~0.8s, of which ~0.4s is a fresh handshake, and
+# a scan issues dozens of calls. The client is per-thread because requests.Session
+# is not documented thread-safe, and the scan fetches on a worker pool.
+_session_local = threading.local()
+
+
+def _session() -> requests.Session:
+    session = getattr(_session_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        _session_local.session = session
+    return session
 
 
 def request(
@@ -82,7 +92,7 @@ def request(
     params: dict[str, object] | None = None,
     json: dict[str, object] | None = None,
 ) -> dict:
-    response = _session.request(
+    response = _session().request(
         method,
         f"{BASE_URL}/{path.lstrip('/')}",
         headers={"Authorization": f"Bearer {_token()}", "Content-Type": "application/json"},
