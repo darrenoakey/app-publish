@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
@@ -42,6 +43,7 @@ APPS_LIMIT = 200
 VERSIONS_LIMIT = 10
 SUBMISSIONS_LIMIT = 20
 BUILDS_LIMIT = 200
+ASC_FETCH_WORKERS = 12
 BOARD_PAGE_LIMIT = 200
 BOARD_SEARCH_MAX_PAGES = 50
 BOARD_SEARCH_SLACK = dt.timedelta(minutes=10)
@@ -150,37 +152,76 @@ def page_coverage(source: str, document: dict, limit: int) -> dict:
 # ##################################################################
 # collect asc
 # every app with its versions (and attached build), review submissions, builds
+def _app_versions(request_fn: Request, app_id: str) -> dict:
+    return request_fn(
+        "GET",
+        f"apps/{app_id}/appStoreVersions",
+        params={
+            "limit": VERSIONS_LIMIT,
+            "include": "build",
+            "fields[appStoreVersions]": "versionString,appVersionState,createdDate,build",
+            "fields[builds]": "version,processingState",
+        },
+    )
+
+
+def _app_submissions(request_fn: Request, app_id: str) -> dict:
+    return request_fn(
+        "GET",
+        "reviewSubmissions",
+        params={
+            "filter[app]": app_id,
+            "limit": SUBMISSIONS_LIMIT,
+            "fields[reviewSubmissions]": "state,submittedDate",
+        },
+    )
+
+
+def _builds_document(request_fn: Request) -> dict:
+    return request_fn(
+        "GET",
+        "builds",
+        params={
+            "limit": BUILDS_LIMIT,
+            "sort": "-uploadedDate",
+            "include": "app,preReleaseVersion",
+            "fields[builds]": "version,processingState,uploadedDate,expired,app,preReleaseVersion",
+            "fields[preReleaseVersions]": "version",
+        },
+    )
+
+
 def collect_asc(request_fn: Request = apple_request) -> dict:
+    # App Store Connect answers one GET per call over ~1s of round-trip latency
+    # and every per-app request is independent, so the whole scan is fetched
+    # concurrently. The requests are the same real GETs in the same set; only
+    # their ordering changes, and results are keyed back per app and reassembled
+    # in Apple's order so the snapshot is byte-identical to a serial scan.
     apps_document = request_fn("GET", "apps", params={"limit": APPS_LIMIT, "fields[apps]": "name,bundleId"})
-    coverage = [page_coverage("apps", apps_document, APPS_LIMIT)]
     apps = apps_document.get("data") or []
     if not apps:
         raise FollowthroughBlocked("asc-api", "App Store Connect returned zero apps; refusing to treat as empty")
+    jobs: list[tuple[str, Callable[[], dict]]] = []
+    for app in apps:
+        app_id = str(app["id"])
+        jobs.append((f"versions:{app_id}", lambda app_id=app_id: _app_versions(request_fn, app_id)))
+        jobs.append((f"submissions:{app_id}", lambda app_id=app_id: _app_submissions(request_fn, app_id)))
+    jobs.append(("builds", lambda: _builds_document(request_fn)))
+    documents: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=min(ASC_FETCH_WORKERS, len(jobs))) as pool:
+        futures = {key: pool.submit(job) for key, job in jobs}
+        for key, future in futures.items():
+            documents[key] = future.result()
+
+    coverage = [page_coverage("apps", apps_document, APPS_LIMIT)]
     inventory = []
     for app in apps:
         app_id = str(app["id"])
         name = str((app.get("attributes") or {}).get("name") or "")
-        versions = request_fn(
-            "GET",
-            f"apps/{app_id}/appStoreVersions",
-            params={
-                "limit": VERSIONS_LIMIT,
-                "include": "build",
-                "fields[appStoreVersions]": "versionString,appVersionState,createdDate,build",
-                "fields[builds]": "version,processingState",
-            },
-        )
+        versions = documents[f"versions:{app_id}"]
         coverage.append(page_coverage(f"appStoreVersions:{name} ({app_id})", versions, VERSIONS_LIMIT))
         builds_by_id = {item["id"]: item for item in versions.get("included") or [] if item.get("type") == "builds"}
-        submissions = request_fn(
-            "GET",
-            "reviewSubmissions",
-            params={
-                "filter[app]": app_id,
-                "limit": SUBMISSIONS_LIMIT,
-                "fields[reviewSubmissions]": "state,submittedDate",
-            },
-        )
+        submissions = documents[f"submissions:{app_id}"]
         coverage.append(page_coverage(f"reviewSubmissions:{name} ({app_id})", submissions, SUBMISSIONS_LIMIT))
         inventory.append(
             {
@@ -193,17 +234,7 @@ def collect_asc(request_fn: Request = apple_request) -> dict:
                 ],
             }
         )
-    builds = request_fn(
-        "GET",
-        "builds",
-        params={
-            "limit": BUILDS_LIMIT,
-            "sort": "-uploadedDate",
-            "include": "app,preReleaseVersion",
-            "fields[builds]": "version,processingState,uploadedDate,expired,app,preReleaseVersion",
-            "fields[preReleaseVersions]": "version",
-        },
-    )
+    builds = documents["builds"]
     coverage.append(page_coverage("builds", builds, BUILDS_LIMIT))
     marketing = {
         item["id"]: str((item.get("attributes") or {}).get("version") or "")
