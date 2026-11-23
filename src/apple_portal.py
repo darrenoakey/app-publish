@@ -95,6 +95,9 @@ def request(
             f"App Store Connect {method} {path} failed ({response.status_code}): {detail}",
             status_code=response.status_code,
         )
+    if not response.content:
+        # DELETE (and some updates) answer 204 No Content, so there is no body.
+        return {}
     return response.json()
 
 
@@ -205,7 +208,18 @@ def _profile_certificate_ids(profile_id: str) -> set[str]:
     return {str(item["id"]) for item in document.get("data", [])}
 
 
-def _profile_is_current(item: dict, certificate_id: str, profile_type: str) -> bool:
+def _profile_device_ids(profile_id: str) -> set[str]:
+    document = request("GET", f"profiles/{profile_id}/relationships/devices", params={"limit": 200})
+    return {str(item["id"]) for item in document.get("data", [])}
+
+
+def _profile_is_current(
+    item: dict,
+    certificate_id: str,
+    profile_type: str,
+    device_ids: set[str] | None = None,
+) -> bool:
+    """True when the profile is reusable; device_ids must all be provisioned in it."""
     attributes = item.get("attributes", {})
     if attributes.get("profileState") != "ACTIVE" or attributes.get("profileType") != profile_type:
         return False
@@ -213,7 +227,9 @@ def _profile_is_current(item: dict, certificate_id: str, profile_type: str) -> b
     if expiration <= dt.datetime.now(tz=dt.UTC) + RENEWAL_WINDOW:
         return False
     try:
-        return certificate_id in _profile_certificate_ids(str(item["id"]))
+        if certificate_id not in _profile_certificate_ids(str(item["id"])):
+            return False
+        return not device_ids or device_ids <= _profile_device_ids(str(item["id"]))
     except ApplePortalError as error:
         if error.status_code != 404:
             raise
@@ -242,28 +258,46 @@ def ensure_profile(
     profile_type: str,
     *,
     device_udids: list[str] | None = None,
+    force: bool = False,
 ) -> bytes:
     identity = ensure_distribution_identity()
     bundle_id = ensure_bundle_id(bundle_identifier, app_name)
+    devices = _device_relationship(device_udids or []) if profile_type == "IOS_APP_ADHOC" else []
+    device_ids = {item["id"] for item in devices}
     profiles = request(
         "GET",
         f"bundleIds/{bundle_id}/profiles",
         params={"limit": 200},
     ).get("data", [])
-    for item in profiles:
-        if _profile_is_current(item, identity.certificate_id, profile_type):
+    for item in profiles if not force else []:
+        if _profile_is_current(item, identity.certificate_id, profile_type, device_ids):
             content = item.get("attributes", {}).get("profileContent")
             if content:
                 return base64.b64decode(content)
             profile = request("GET", f"profiles/{item['id']}")
             return base64.b64decode(profile["data"]["attributes"]["profileContent"])
 
+    name = f"app-publish {profile_type} {bundle_identifier}"
+    # An ACTIVE profile can still be unusable here (for example an ad-hoc profile
+    # that predates a newly added device, or one minted before a capability was
+    # enabled on the App ID). App Store Connect rejects creating a second profile
+    # with the same name (409), so delete the stale duplicates before re-creating,
+    # otherwise every deploy of this bundle fails forever.
+    stale = [
+        str(item["id"])
+        for item in profiles
+        if str(item.get("attributes", {}).get("name")) == name
+        and item.get("attributes", {}).get("profileState") == "ACTIVE"
+    ]
+    for profile_id in stale:
+        request("DELETE", f"profiles/{profile_id}")
+
     relationships: dict[str, object] = {
         "bundleId": {"data": {"type": "bundleIds", "id": bundle_id}},
         "certificates": {"data": [{"type": "certificates", "id": identity.certificate_id}]},
     }
     if profile_type == "IOS_APP_ADHOC":
-        relationships["devices"] = {"data": _device_relationship(device_udids or [])}
+        relationships["devices"] = {"data": devices}
     created = request(
         "POST",
         "profiles",
@@ -271,7 +305,7 @@ def ensure_profile(
             "data": {
                 "type": "profiles",
                 "attributes": {
-                    "name": f"app-publish {profile_type} {bundle_identifier}",
+                    "name": name,
                     "profileType": profile_type,
                 },
                 "relationships": relationships,

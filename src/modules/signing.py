@@ -22,6 +22,12 @@ from utils import (
     secret_file_argument,
 )
 
+# `xcodebuild -showBuildSettings` only reads project metadata, but it still
+# resolves Swift package manifests and can take minutes on a loaded host. The
+# old 60s ceiling failed real deploys with an unhandled TimeoutExpired, so keep
+# the ceiling generous and report overruns as a retryable portal error.
+BUILD_SETTINGS_TIMEOUT = 600
+
 
 def has_distribution_cert() -> bool:
     """Report whether the encrypted provider contains a usable remote identity."""
@@ -69,12 +75,20 @@ def _rcodesign_binary() -> str:
 _SIGNING_IDENTITY_ENTITLEMENTS = frozenset(
     {
         "application-identifier",
+        "aps-environment",
         "beta-reports-active",
         "com.apple.developer.team-identifier",
         "get-task-allow",
         "keychain-access-groups",
     }
 )
+
+# Entitlements whose value is decided by the provisioning profile, not by the
+# app's own entitlements file. A distribution/ad-hoc profile grants
+# aps-environment "production" while a Debug build asks for "development";
+# requiring them to be equal rejected every push-enabled app. Xcode signs with
+# the profile's value, so drop the requested one and carry the profile's.
+_PROFILE_AUTHORITATIVE_ENTITLEMENTS = frozenset({"aps-environment"})
 
 
 _PREFIX_WILDCARD_ENTITLEMENTS = frozenset(
@@ -141,8 +155,15 @@ def _value_authorized(key: str, requested, authorized) -> bool:
 
 def _select_entitlements(profile: dict, requested: dict, document: dict | None = None) -> dict:
     resolved = _resolve_profile_variables(requested, document or {})
+    # These are decided by the profile, so only require that it grants them at
+    # all; the profile's own value is carried into the signature below.
+    for key in _PROFILE_AUTHORITATIVE_ENTITLEMENTS:
+        resolved.pop(key, None)
     unauthorized = sorted(
         key for key, value in resolved.items() if key not in profile or not _value_authorized(key, value, profile[key])
+    )
+    unauthorized.extend(
+        sorted(key for key in _PROFILE_AUTHORITATIVE_ENTITLEMENTS if key in requested and key not in profile)
     )
     if unauthorized:
         raise apple_portal.ApplePortalError(
@@ -256,13 +277,21 @@ def requested_entitlements(
             "-json",
         ]
     )
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=BUILD_SETTINGS_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        # A loaded host can make this metadata-only query take minutes; report it
+        # as a retryable portal error instead of an unhandled traceback.
+        raise apple_portal.ApplePortalError(
+            f"xcodebuild -showBuildSettings for {xcode_project} exceeded "
+            f"{BUILD_SETTINGS_TIMEOUT}s; the host is overloaded, retry the deploy"
+        ) from error
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise apple_portal.ApplePortalError(f"could not resolve source entitlements: {detail}")
@@ -327,7 +356,22 @@ def sign_app_bundle(
                 profile_type,
                 device_udids=device_udids,
             )
-            entitlements_by_scope.append((scope, _profile_entitlements(profile, requested[identifier])))
+            try:
+                resolved = _profile_entitlements(profile, requested[identifier])
+            except apple_portal.ApplePortalError:
+                # A reused profile can predate a capability the App ID now has
+                # (for example PUSH_NOTIFICATIONS), so it cannot authorize what
+                # the app declares. Re-mint it once, then let a second failure
+                # surface as the real error.
+                profile = apple_portal.ensure_profile(
+                    identifier,
+                    f"{app_name} {bundle.stem}",
+                    profile_type,
+                    device_udids=device_udids,
+                    force=True,
+                )
+                resolved = _profile_entitlements(profile, requested[identifier])
+            entitlements_by_scope.append((scope, resolved))
             embedded_profile = bundle / "embedded.mobileprovision"
             embedded_profile.write_bytes(profile)
             embedded_profile.chmod(0o644)

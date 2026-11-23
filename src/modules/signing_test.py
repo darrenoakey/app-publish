@@ -85,8 +85,13 @@ def test_requested_capabilities_preserve_exact_values_within_profile_authorizati
     assert selected["com.apple.security.application-groups"] == requested["com.apple.security.application-groups"]
     assert "com.apple.developer.game-center" not in selected
     assert "com.apple.developer.usernotes" not in selected
-    with pytest.raises(apple_portal.ApplePortalError, match="aps-environment"):
-        _select_entitlements(profile, {**requested, "aps-environment": "development"})
+    # aps-environment is owned by the profile: a Debug build asking for
+    # "development" against a production profile must sign with the profile's
+    # value rather than fail. Requiring equality broke every push-enabled app.
+    assert _select_entitlements(profile, {**requested, "aps-environment": "development"})["aps-environment"] == (
+        "production"
+    )
+    # But a profile that does not grant the capability at all must still fail.
     with pytest.raises(apple_portal.ApplePortalError, match="aps-environment"):
         _select_entitlements({"application-identifier": profile["application-identifier"]}, requested)
 
@@ -213,3 +218,35 @@ def test_real_bundle_is_profiled_and_signed_without_keychain(tmp_path) -> None:
     state = ProjectState(bundle_id=bundle_id, project_name="OL Bridge")
     assert run(tmp_path, state)
     assert state.metadata["signing_configured"] is True
+
+
+def test_aps_environment_comes_from_the_profile_not_the_debug_build() -> None:
+    # A distribution/ad-hoc profile grants aps-environment "production" while a
+    # Debug build asks for "development". Requiring equality rejected every
+    # push-enabled app (beezle-ios) even though the profile was correct.
+    profile = {
+        "application-identifier": "TEAMID.com.darrenoakey.beezle",
+        "aps-environment": "production",
+        "com.apple.developer.team-identifier": "TEAMID",
+        "get-task-allow": False,
+        "keychain-access-groups": ["TEAMID.*"],
+    }
+    requested = {"aps-environment": "development"}
+
+    selected = _select_entitlements(profile, requested)
+
+    assert selected["aps-environment"] == "production"
+    assert selected["application-identifier"] == "TEAMID.com.darrenoakey.beezle"
+
+
+def test_missing_aps_environment_in_the_profile_still_fails_closed() -> None:
+    # The profile must actually grant the capability; otherwise signing would
+    # produce an app that cannot receive push notifications.
+    profile = {
+        "application-identifier": "TEAMID.com.darrenoakey.beezle",
+        "com.apple.developer.team-identifier": "TEAMID",
+        "get-task-allow": False,
+        "keychain-access-groups": ["TEAMID.*"],
+    }
+    with pytest.raises(apple_portal.ApplePortalError, match="aps-environment"):
+        _select_entitlements(profile, {"aps-environment": "development"})

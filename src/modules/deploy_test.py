@@ -8,6 +8,7 @@ from modules.deploy import (
     detect_project_type,
     ensure_dev_profile,
     find_connected_devices,
+    install_attempt_sequence,
     install_command_attempts,
     install_on_device,
     parse_devicectl_devices,
@@ -75,11 +76,25 @@ def test_device_output_parsers_filter_and_deduplicate_real_command_shapes() -> N
                 {
                     "identifier": "wifi-id",
                     "connectionProperties": {"transportType": "localNetwork"},
+                    "deviceProperties": {
+                        "name": "Apollo",
+                        "marketingName": "iPhone 16 Pro",
+                        "osVersionNumber": "26.3",
+                    },
+                },
+                {
+                    "identifier": "simulator-id",
+                    "connectionProperties": {"transportType": "sameMachine"},
+                    "deviceProperties": {"name": "iPhone 17 Pro"},
                 },
             ]
         }
     }
-    assert parse_devicectl_devices(json.dumps(devicectl))[0]["id"] == "wired-id"
+    parsed = parse_devicectl_devices(json.dumps(devicectl))
+    # A phone paired over Wi-Fi reports localNetwork and is still a real,
+    # installable device; dropping it made Apollo look absent.
+    assert [device["id"] for device in parsed] == ["wired-id", "wifi-id"]
+    assert parsed[1]["name"] == "Apollo"
     assert parse_devicectl_devices("not json") == []
 
 
@@ -129,3 +144,70 @@ def test_connected_device_discovery_uses_the_real_apple_toolchain() -> None:
         assert set(device) == {"id", "name", "model", "os"}
         assert device["id"]
         assert device["name"]
+
+
+def test_devicectl_install_retries_keep_the_exact_target_and_artifact() -> None:
+    path = "/tmp/App.app"
+    device = "some-device-id"
+    devicectl, ios_deploy = install_command_attempts(path, device)
+
+    assert install_attempt_sequence(path, device) == [devicectl, devicectl, devicectl, ios_deploy]
+
+
+def test_bundle_id_is_detected_from_a_nested_ios_project_yml(tmp_path) -> None:
+    # agentd3-ios keeps its XcodeGen spec under ios/, not the repo root, so
+    # root-only detection reported "Could not detect bundle ID".
+    ios = tmp_path / "ios"
+    ios.mkdir()
+    (ios / "project.yml").write_text(
+        """name: agentd3-ios
+targets:
+  agentd3-iosTests:
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.darrenoakey.agentd3.tests
+  agentd3-ios:
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.darrenoakey.agentd3
+"""
+    )
+
+    assert detect_bundle_id(tmp_path) == "com.darrenoakey.agentd3"
+
+
+def test_bundle_id_prefers_the_app_target_over_a_test_target(tmp_path) -> None:
+    # A spec may declare a test target first; signing the test runner would be
+    # wrong, so the app identifier wins.
+    (tmp_path / "project.yml").write_text(
+        """targets:
+  AppUITests:
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.darrenoakey.thing.uitests
+  App:
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.darrenoakey.thing
+"""
+    )
+
+    assert detect_bundle_id(tmp_path) == "com.darrenoakey.thing"
+
+
+def test_bundle_id_is_none_when_no_project_metadata_exists(tmp_path) -> None:
+    assert detect_bundle_id(tmp_path) is None
+
+
+def test_native_project_under_ios_dir_is_detected(tmp_path) -> None:
+    # agentd3-ios keeps ios/agentd3-ios.xcodeproj rather than a root project,
+    # so root-only detection reported "No Xcode project found".
+    ios = tmp_path / "ios"
+    project = ios / "agentd3-ios.xcodeproj"
+    project.mkdir(parents=True)
+
+    kind, xcodeproj, scheme = detect_project_type(tmp_path)
+
+    assert kind == "native"
+    assert xcodeproj == project
+    assert scheme == "agentd3-ios"

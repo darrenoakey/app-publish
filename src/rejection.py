@@ -78,16 +78,21 @@ def lookup_rejection(app_name: str, dsn: str = GMAIL_ARCHIVE_DSN) -> str:
                 WHERE m.from_addr ILIKE %s
                   AND (
                     m.subject ILIKE %s
-                    OR b.body_html ILIKE %s
-                    OR b.body_text ILIKE %s
+                    OR EXISTS (
+                      SELECT 1 FROM message_bodies search
+                      WHERE search.gmail_id = m.gmail_id
+                        AND (search.body_html ILIKE %s OR search.body_text ILIKE %s)
+                    )
                   )
                   AND (
                     m.subject ILIKE %s
                     OR m.subject ILIKE %s
                     OR m.subject ILIKE %s
-                    OR b.body_html ILIKE %s
-                    OR b.body_html ILIKE %s
-                    OR b.body_text ILIKE %s
+                    OR EXISTS (
+                      SELECT 1 FROM message_bodies reason
+                      WHERE reason.gmail_id = m.gmail_id
+                        AND (reason.body_html ILIKE %s OR reason.body_html ILIKE %s OR reason.body_text ILIKE %s)
+                    )
                   )
                 ORDER BY m.internal_date DESC
                 LIMIT 1

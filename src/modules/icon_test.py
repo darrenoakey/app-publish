@@ -25,13 +25,11 @@ importlib.reload(icon_module)
 # ##################################################################
 # durable codex icon generation
 # proves the real canonical service path produces the exact artifact and
-# recovers the same durable operation identity after local output loss
-def test_generate_master_icon_via_durable_codex_queue() -> None:
-    project_path = Path(__file__).resolve().parents[2] / "output" / "testing" / "icon-canary"
-    project_path.mkdir(parents=True, exist_ok=True)
+# recovers those bytes from the real-response cache after local output loss
+def test_generate_master_icon_via_durable_codex_queue(tmp_path: Path) -> None:
+    # Keep durable job state scoped to this run, not a previous gate checkout.
+    project_path = tmp_path
     master_icon = project_path / "assets" / "icon-1024.png"
-    if master_icon.exists():
-        master_icon.unlink()
 
     state = ProjectState(
         project_path=str(project_path),

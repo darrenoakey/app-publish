@@ -23,7 +23,6 @@ from utils import (
     capacitor_sync,
     print_info,
     print_success,
-    print_warning,
     print_error,
     run as exec_cmd,
     parse_schemes,
@@ -34,36 +33,57 @@ from utils import (
 # ##################################################################
 # detect bundle id
 # auto-detect bundle id from capacitor.config.json or project.yml
-def detect_bundle_id(project_path: Path) -> str | None:
-    # try capacitor.config.json
-    cap_config = project_path / "capacitor.config.json"
-    if cap_config.exists():
-        try:
-            data = json.loads(cap_config.read_text())
-            bid = data.get("appId")
-            if bid:
-                return bid
-        except json.JSONDecodeError:
-            pass
+def _bundle_id_from_project_yml(project_yml: Path) -> str | None:
+    """Read PRODUCT_BUNDLE_IDENTIFIER from an XcodeGen spec, app target only.
 
-    # try project.yml (XcodeGen)
-    project_yml = project_path / "project.yml"
-    if project_yml.exists():
-        text = project_yml.read_text()
-        match = re.search(r'PRODUCT_BUNDLE_IDENTIFIER:\s*["\']?([^\s"\']+)', text)
-        if match:
-            return match.group(1)
+    The first match in the file is normally the application target, but a spec
+    can also declare test targets first. Prefer the identifier that is not a
+    test/UITest bundle so we do not sign the test runner.
+    """
+    if not project_yml.is_file():
+        return None
+    text = project_yml.read_text()
+    matches = re.findall(r'PRODUCT_BUNDLE_IDENTIFIER:\s*["\']?([^\s"\']+)', text)
+    if not matches:
+        return None
+    for candidate in matches:
+        lowered = candidate.lower()
+        if not lowered.endswith((".tests", ".uitests", ".unittests")):
+            return candidate
+    return matches[0]
+
+
+def detect_bundle_id(project_path: Path) -> str | None:
+    # Many repos keep the Xcode project under ios/ rather than the repo root
+    # (agentd3-ios does), so probe the root first and then the usual iOS dirs.
+    search_dirs = [project_path, project_path / "ios", project_path / "ios" / "App"]
+
+    for directory in search_dirs:
+        cap_config = directory / "capacitor.config.json"
+        if cap_config.is_file():
+            try:
+                bid = json.loads(cap_config.read_text()).get("appId")
+                if bid:
+                    return bid
+            except json.JSONDecodeError:
+                pass
+
+    for directory in search_dirs:
+        bid = _bundle_id_from_project_yml(directory / "project.yml")
+        if bid:
+            return bid
 
     # try finding xcodeproj and reading build settings
-    for xcodeproj in project_path.glob("*.xcodeproj"):
-        ret_code, output = exec_cmd(
-            ["xcodebuild", "-project", str(xcodeproj), "-showBuildSettings"],
-            timeout=30,
-        )
-        if ret_code == 0:
-            match = re.search(r"PRODUCT_BUNDLE_IDENTIFIER = (.+)", output)
-            if match:
-                return match.group(1).strip()
+    for directory in search_dirs:
+        for xcodeproj in directory.glob("*.xcodeproj"):
+            ret_code, output = exec_cmd(
+                ["xcodebuild", "-project", str(xcodeproj), "-showBuildSettings"],
+                timeout=30,
+            )
+            if ret_code == 0:
+                match = re.search(r"PRODUCT_BUNDLE_IDENTIFIER = (.+)", output)
+                if match:
+                    return match.group(1).strip()
 
     return None
 
@@ -78,20 +98,22 @@ def detect_project_type(project_path: Path) -> tuple[str, Path, str]:
     if cap_xcodeproj.exists():
         return "web", cap_xcodeproj, "App"
 
-    # native project - find xcodeproj at root
-    for xcodeproj in sorted(project_path.glob("*.xcodeproj")):
-        # get scheme from xcodebuild -list
-        ret_code, output = exec_cmd(
-            ["xcodebuild", "-project", str(xcodeproj), "-list"],
-            timeout=30,
-        )
-        if ret_code == 0:
-            schemes = parse_schemes(output)
-            if schemes:
-                return "native", xcodeproj, pick_scheme(schemes, xcodeproj.stem)
+    # native project - an Xcode project can sit at the repo root or under ios/
+    # (agentd3-ios keeps ios/agentd3-ios.xcodeproj), so search both.
+    for directory in (project_path, project_path / "ios"):
+        for xcodeproj in sorted(directory.glob("*.xcodeproj")):
+            # get scheme from xcodebuild -list
+            ret_code, output = exec_cmd(
+                ["xcodebuild", "-project", str(xcodeproj), "-list"],
+                timeout=30,
+            )
+            if ret_code == 0:
+                schemes = parse_schemes(output)
+                if schemes:
+                    return "native", xcodeproj, pick_scheme(schemes, xcodeproj.stem)
 
-        # alternative: use project name as scheme
-        return "native", xcodeproj, xcodeproj.stem
+            # alternative: use project name as scheme
+            return "native", xcodeproj, xcodeproj.stem
 
     return "unknown", Path(), ""
 
@@ -139,6 +161,13 @@ def parse_ios_deploy_devices(output: str, seen_ids: set[str]) -> list[dict]:
     return devices
 
 
+# Physical transports CoreDevice reports for a real, reachable iPhone. A
+# device paired over Wi-Fi reports "localNetwork" instead of "wired", and
+# dropping it made Apollo look absent while it was in fact installable over
+# the tunnel. Simulators report "sameMachine" and stay excluded.
+_PHYSICAL_TRANSPORTS = {"wired", "localNetwork"}
+
+
 def parse_devicectl_devices(output: str) -> list[dict]:
     try:
         data = json.loads(output)
@@ -146,7 +175,7 @@ def parse_devicectl_devices(output: str) -> list[dict]:
         return []
     devices = []
     for device in data.get("result", {}).get("devices", []):
-        if device.get("connectionProperties", {}).get("transportType") == "wired":
+        if device.get("connectionProperties", {}).get("transportType") in _PHYSICAL_TRANSPORTS:
             devices.append(
                 {
                     "id": device.get("identifier"),
@@ -340,14 +369,31 @@ def install_command_attempts(app_path: str, device_id: str | None = None) -> lis
 
 # installs app on connected device - tries each installer attempt in order
 # (devicectl first, legacy ios-deploy last) until one succeeds
+#
+# A Wi-Fi-paired phone only ever answers devicectl: ios-deploy needs USB. A
+# single devicectl attempt that loses a race with another CoreDevice client
+# ("device is busy") therefore used to drop straight to an installer that could
+# never work, and the deploy reported failure for an app that installs fine.
+# Retry devicectl a few times before moving on to the legacy installer.
+_DEVICECTL_ATTEMPTS = 3
+
+
+def install_attempt_sequence(app_path: str, device_id: str | None = None) -> list[list[str]]:
+    """Return installer commands in order; each devicectl invocation opens a fresh connection."""
+    devicectl, ios_deploy = install_command_attempts(app_path, device_id)
+    return [devicectl.copy() for _ in range(_DEVICECTL_ATTEMPTS)] + [ios_deploy]
+
+
 def install_on_device(app_path: str, device_id: str | None = None) -> bool:
     print_info(f"Installing {Path(app_path).name}...")
 
-    for cmd in install_command_attempts(app_path, device_id):
-        ret_code, output = exec_cmd(cmd, timeout=120)
+    sequence = install_attempt_sequence(app_path, device_id)
+    for index, cmd in enumerate(sequence):
+        ret_code, _ = exec_cmd(cmd, timeout=120)
         if ret_code == 0:
             return True
-        print_info(f"{' '.join(cmd[:2])} failed, trying next installer...")
+        if index + 1 < len(sequence) and sequence[index + 1] != cmd:
+            print_info(f"{' '.join(cmd[:2])} failed, trying next installer...")
 
     print_error("Installation failed")
     print_info("Make sure device is unlocked and trusts this computer")
@@ -376,17 +422,12 @@ def run(project_path: Path, state: ProjectState, device_name: str = "Starbuck") 
     for d in devices:
         print_info(f"  - {d['name']} ({d['model']}) - {d['id'][:12]}...")
 
-    # Find matching device by name
-    device = None
-    for d in devices:
-        if device_name.lower() in d["name"].lower():
-            device = d
-            break
-
-    if not device:
-        print_warning(f"Device '{device_name}' not found, using first available")
-        device = devices[0]
-
+    # Explicit installs must never switch to another phone when the target drops offline.
+    matches = [d for d in devices if device_name.casefold() in (d["name"].casefold(), d["id"].casefold())]
+    if len(matches) != 1 or not matches[0]["id"]:
+        print_error(f"Device {device_name!r} is absent or ambiguous; refusing to install")
+        return False
+    device = matches[0]
     device_id = device["id"]
     print_info(f"Deploying to: {device['name']}")
 

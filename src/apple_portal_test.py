@@ -101,3 +101,69 @@ def test_invalid_local_and_remote_material_fails_closed() -> None:
     with pytest.raises(apple_portal.ApplePortalError) as exc_info:
         apple_portal.request("GET", "definitely-not-an-apple-resource")
     assert exc_info.value.status_code == 404
+
+
+def test_adhoc_profile_missing_a_target_device_is_not_reused() -> None:
+    # A reused ad-hoc profile must provision every target device; one that
+    # lacks a requested device would install-fail on that phone.
+    bundle = apple_portal.request(
+        "GET",
+        "bundleIds",
+        params={"filter[identifier]": "com.darrenoakey.olBridge", "limit": 2},
+    )["data"][0]
+    profiles = apple_portal.request("GET", f"bundleIds/{bundle['id']}/profiles", params={"limit": 200})["data"]
+    adhoc = next(item for item in profiles if item["attributes"]["profileType"] == "IOS_APP_ADHOC")
+    certificate_id = next(iter(apple_portal._profile_certificate_ids(adhoc["id"])))
+    provisioned = apple_portal._profile_device_ids(adhoc["id"])
+    assert provisioned
+    registered = apple_portal.request("GET", "devices", params={"limit": 200})["data"]
+    outsider = next(str(item["id"]) for item in registered if str(item["id"]) not in provisioned)
+
+    assert not apple_portal._profile_is_current(adhoc, certificate_id, "IOS_APP_ADHOC", provisioned | {outsider})
+    assert apple_portal._profile_is_current(adhoc, certificate_id, "IOS_APP_ADHOC", set()) == (
+        apple_portal._profile_is_current(adhoc, certificate_id, "IOS_APP_ADHOC", provisioned)
+    )
+
+
+def test_adhoc_profile_expansion_reuse_and_forced_reissue() -> None:
+    # Exercise real profile creation, device coverage, renewal and empty DELETE
+    # responses under an isolated bundle. Nothing is built or sent to a phone.
+    label = f"app-publish profile test {uuid.uuid4().hex}"
+    identifier = f"com.darrenoakey.apppublishtest.{uuid.uuid4().hex}"
+    kind = "IOS_APP_ADHOC"
+    devices = [
+        item for item in apple_portal.request("GET", "devices", params={"limit": 200})["data"]
+        if item["attributes"]["status"] == "ENABLED"
+        and item["attributes"]["deviceClass"] == "IPHONE"
+    ][:2]
+    assert len(devices) == 2, "real ad-hoc coverage test requires two registered iPhones"
+    first_udid, second_udid = (item["attributes"]["udid"] for item in devices)
+    target_ids = {item["id"] for item in devices}
+    bundle_id = apple_portal.ensure_bundle_id(identifier, label)
+
+    def profiles() -> list[dict]:
+        return apple_portal.request("GET", f"bundleIds/{bundle_id}/profiles")["data"]
+
+    try:
+        original = apple_portal.ensure_profile(identifier, label, kind, device_udids=[first_udid])
+        [narrow] = profiles()
+        assert apple_portal._profile_device_ids(narrow["id"]) == {devices[0]["id"]}
+        assert apple_portal.ensure_profile(identifier, label, kind, device_udids=[first_udid]) == original
+
+        both_udids = [first_udid, second_udid]
+        expanded = apple_portal.ensure_profile(identifier, label, kind, device_udids=both_udids)
+        [wide] = profiles()
+        assert wide["id"] != narrow["id"]
+        assert apple_portal._profile_device_ids(wide["id"]) == target_ids
+        assert expanded != original
+        assert apple_portal.ensure_profile(identifier, label, kind, device_udids=both_udids) == expanded
+
+        renewed = apple_portal.ensure_profile(identifier, label, kind, device_udids=both_udids, force=True)
+        [current] = profiles()
+        assert current["id"] != wide["id"]
+        assert apple_portal._profile_device_ids(current["id"]) == target_ids
+        assert renewed != expanded
+    finally:
+        for item in profiles():
+            assert apple_portal.request("DELETE", f"profiles/{item['id']}") == {}
+        apple_portal.request("DELETE", f"bundleIds/{bundle_id}")
