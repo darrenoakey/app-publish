@@ -10,9 +10,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import ProjectState
 from config import WEB_INDICATORS, SWIFT_INDICATORS, BUNDLE_ID_PREFIX
+from retirement import retirement_for
 from utils import (
     print_info,
     print_success,
+    print_error,
     dir_exists,
     file_exists,
 )
@@ -135,6 +137,14 @@ def run(project_path: Path, state: ProjectState) -> bool:
     # ##################################################################
     # run detection step
     # sets state.project_type and state.bundle_id (if not already set)
+    bundle_id = state.bundle_id or detect_bundle_id(project_path)
+    retired = retirement_for(bundle_id=bundle_id or "")
+    if retired:
+        print_error(
+            f"{retired.name} ({retired.bundle_id}) is retired. "
+            "Publishing, rebuilding, screenshots, uploads, and submissions are disabled."
+        )
+        return False
     print_info(f"Analyzing project: {project_path.name}")
 
     # Detect project type

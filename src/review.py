@@ -9,6 +9,7 @@ from apple_portal import request as apple_request
 from config import SRC_ROOT
 from notices import NoticeStore, PostgresNoticeStore
 from rejection import lookup_rejection
+from retirement import is_retired
 from utils import ensure_dir, print_error, print_header, print_info, print_warning
 
 BAD_STATES = frozenset(
@@ -142,7 +143,7 @@ def watch_reviews(
     notices: NoticeStore | None = None,
     lookup=lookup_rejection,
 ) -> list[ReviewVersion]:
-    rows = collect_review_status(request_fn)
+    rows = [row for row in collect_review_status(request_fn) if not is_retired(app_id=row.app_id)]
     previous = load_snapshot(snapshot_path)
     notices = notices or PostgresNoticeStore()
     transitions = new_bad_states(previous, rows)

@@ -26,6 +26,7 @@ import requests
 
 from apple_portal import request as apple_request
 from rejection import extract_rejection_text
+from retirement import filter_delivery_entries, is_retired
 
 STATE_PATH = Path.home() / "Library" / "Application Support" / "app-publish" / "followthrough-state.json"
 AGENT_LINK_URL = "https://localhost:8900"
@@ -201,9 +202,13 @@ def collect_asc(request_fn: Request = apple_request) -> dict:
     apps = apps_document.get("data") or []
     if not apps:
         raise FollowthroughBlocked("asc-api", "App Store Connect returned zero apps; refusing to treat as empty")
+    if all(is_retired(app_id=str(app["id"])) for app in apps):
+        raise FollowthroughBlocked("asc-api", "App Store Connect returned only retired apps; refusing an empty scan")
     jobs: list[tuple[str, Callable[[], dict]]] = []
     for app in apps:
         app_id = str(app["id"])
+        if is_retired(app_id=app_id):
+            continue
         jobs.append((f"versions:{app_id}", lambda app_id=app_id: _app_versions(request_fn, app_id)))
         jobs.append((f"submissions:{app_id}", lambda app_id=app_id: _app_submissions(request_fn, app_id)))
     jobs.append(("builds", lambda: _builds_document(request_fn)))
@@ -214,9 +219,15 @@ def collect_asc(request_fn: Request = apple_request) -> dict:
             documents[key] = future.result()
 
     coverage = [page_coverage("apps", apps_document, APPS_LIMIT)]
+    coverage[0]["returned"] -= len(apps_document.get("data") or []) - sum(
+        not is_retired(app_id=str(app["id"])) for app in apps
+    )
+    coverage[0]["excluded_retired"] = len(apps) - coverage[0]["returned"]
     inventory = []
     for app in apps:
         app_id = str(app["id"])
+        if is_retired(app_id=app_id):
+            continue
         name = str((app.get("attributes") or {}).get("name") or "")
         versions = documents[f"versions:{app_id}"]
         coverage.append(page_coverage(f"appStoreVersions:{name} ({app_id})", versions, VERSIONS_LIMIT))
@@ -245,6 +256,8 @@ def collect_asc(request_fn: Request = apple_request) -> dict:
     for item in builds.get("data") or []:
         relationships = item.get("relationships") or {}
         app_ref = ((relationships.get("app") or {}).get("data") or {}).get("id")
+        if is_retired(app_id=str(app_ref or "")):
+            continue
         pre_ref = ((relationships.get("preReleaseVersion") or {}).get("data") or {}).get("id")
         build_rows.append(
             {
@@ -254,6 +267,13 @@ def collect_asc(request_fn: Request = apple_request) -> dict:
                 **item["attributes"],
             }
         )
+    for item in builds.get("data") or []:
+        if not is_retired(
+            app_id=str((((item.get("relationships") or {}).get("app") or {}).get("data") or {}).get("id") or "")
+        ):
+            continue
+        coverage[-1]["returned"] -= 1
+        coverage[-1]["excluded_retired"] = coverage[-1].get("excluded_retired", 0) + 1
     return {"apps": inventory, "builds": build_rows, "coverage": coverage}
 
 
@@ -414,6 +434,8 @@ def mail_findings(mails: list[dict], app_ids: dict[str, str]) -> list[Finding]:
             if not match:
                 continue
             app = match.group("app") or ""
+            if is_retired(name=app):
+                break
             detail = mail["subject"]
             if kind == "build_issue_receipt" and mail["body"]:
                 detail = f"{detail} :: {' / '.join(mail['body'].splitlines()[:6])}"
@@ -424,6 +446,15 @@ def mail_findings(mails: list[dict], app_ids: dict[str, str]) -> list[Finding]:
             )
             break
     return findings
+
+
+def purge_retired_state(state: dict) -> int:
+    """Retire stale durable episodes before output or owner delivery can use them."""
+    removed = 0
+    for bucket in ("seen", "pending", "sending", "delivered"):
+        state[bucket], count = filter_delivery_entries(state[bucket])
+        removed += count
+    return removed
 
 
 # ##################################################################
@@ -620,6 +651,7 @@ def run_followthrough(
     now = now or dt.datetime.now(dt.UTC)
     with state_lock(state_path):
         state = load_state(state_path)
+        purge_retired_state(state)
         blockers: list[FollowthroughBlocked] = []
         findings: list[Finding] = []
         coverage: list[dict] = []
@@ -642,6 +674,7 @@ def run_followthrough(
             coverage.append(mail_coverage)
             findings += mail_findings(mails, app_ids)
             state["mail_seen"].update({mail["id"]: mail["received"] for mail in mails})
+            mails = [mail for mail in mails if not any(name in mail["subject"] for name in ("OL Videos", "daz_music"))]
             horizon = now - dt.timedelta(days=MAIL_RETENTION_DAYS)
             state["mail_seen"] = {
                 key: value for key, value in state["mail_seen"].items() if parse_time(value) > horizon
@@ -843,6 +876,7 @@ def deliver(
     board = board or BoardClient()
     with state_lock(state_path):
         state = load_state(state_path)
+        purge_retired_state(state)
         todo, lines = _resolve(state, ids)
         fresh: list[tuple[str, dict]] = []
         for fingerprint, entry in todo:

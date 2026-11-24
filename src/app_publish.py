@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import hashlib
 
 from config import PIPELINE_STEPS, OPTIONAL_STEPS, validate_secrets
+from retirement import retirement_for
 from state import load_state, save_state, reset_state, ProjectState
 from utils import (
     print_header,
@@ -310,6 +311,13 @@ Examples:
 
     if not project_path.is_dir():
         print_error(f"Project path is not a directory: {project_path}")
+        return 1
+
+    retired = retirement_for(bundle_id=load_state(project_path).bundle_id or "")
+    if retired:
+        print_error(
+            f"{retired.name} ({retired.bundle_id}) is retired; no publishing or follow-through action is allowed."
+        )
         return 1
 
     # status only

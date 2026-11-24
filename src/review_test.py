@@ -4,6 +4,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import psycopg2
+import pytest
 import requests
 
 from apple_portal import request as apple_request
@@ -111,6 +112,29 @@ def test_collect_and_watch_rejected_transition_against_local_asc(tmp_path) -> No
         connection.commit()
     assert len(messages) == 1
     assert "ITMS-90111" in messages[0][0]
+
+
+def test_retired_watch_never_queries_rejection_reason_or_notices(tmp_path) -> None:
+    retired_id = "retired-review-version"
+    document = json.loads(json.dumps(REJECTED_DOCUMENT))
+    document["data"][0].update(
+        id="6759585788", attributes={"name": "OL Videos", "bundleId": "com.darrenoakey.olVideos"}
+    )
+    document["data"][0]["relationships"]["appStoreVersions"]["data"][0]["id"] = retired_id
+    document["included"][0]["id"] = retired_id
+    AppsHandler.document = document
+    server = ThreadingHTTPServer(("127.0.0.1", 0), AppsHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        snapshot = tmp_path / "review.json"
+        assert watch_reviews(snapshot, local_request(base), lookup=lambda name: pytest.fail("retired lookup")) == []
+        assert snapshot.read_text() == "{}\n"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def test_new_bad_states_ignore_ready_for_sale() -> None:

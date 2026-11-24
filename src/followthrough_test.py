@@ -715,3 +715,43 @@ def test_collect_asc_live_get_only_includes_groupiecam() -> None:
 def test_agent_link_live_apple_mail_search_is_reachable() -> None:
     result = agent_link_call("search", {"query": "from:no_reply@email.apple.com", "max_results": 1})
     assert isinstance(result.get("messages", []), list)
+
+
+def test_retired_scan_is_excluded_without_per_app_requests(tmp_path, local_server) -> None:
+    document = asc_document("active-app", "READY_FOR_SALE", "COMPLETE", "VALID")
+    document["/apps"]["data"].append(
+        {"id": "6759585788", "attributes": {"name": "OL Videos", "bundleId": "com.darrenoakey.olVideos"}}
+    )
+    document["/apps"]["meta"]["paging"]["total"] = 2
+    document["/builds"]["data"].append(
+        {
+            "id": "retired-build",
+            "attributes": {"version": "9", "processingState": "INVALID", "expired": False},
+            "relationships": {"app": {"data": {"id": "6759585788"}}},
+        }
+    )
+    document["/mail/search"] = {"messages": []}
+    LocalHandler.routes = document
+    snapshot = collect_asc(local_asc(local_server))
+    assert [app["app_id"] for app in snapshot["apps"]] == ["active-app"]
+    assert [build["app_id"] for build in snapshot["builds"]] == ["active-app"]
+    assert snapshot["coverage"][0]["excluded_retired"] == 1
+    assert snapshot["coverage"][-1]["excluded_retired"] == 1
+    evidence = tmp_path / "evidence.json"
+    code, _ = scan(tmp_path / "state.json", local_server, evidence_path=evidence)
+    assert code == EXIT_QUIET
+    assert "6759585788" not in evidence.read_text()
+    assert "OL Videos" not in evidence.read_text()
+    assert "active-app" in evidence.read_text()
+
+
+def test_retired_apple_mail_creates_no_finding_or_pending_delivery(tmp_path, local_server) -> None:
+    document = asc_document("active-app", "READY_FOR_SALE", "COMPLETE", "VALID")
+    document.update(mail_routes("retired-mail", "You have a message from App Review about OL Videos (iOS).", "Old"))
+    LocalHandler.routes = document
+    evidence = tmp_path / "evidence.json"
+    code, lines = scan(tmp_path / "state.json", local_server, evidence_path=evidence)
+    assert code == EXIT_QUIET
+    assert "OL Videos" not in "\n".join(lines)
+    assert "OL Videos" not in evidence.read_text()
+    assert not json.loads((tmp_path / "state.json").read_text())["pending"]
