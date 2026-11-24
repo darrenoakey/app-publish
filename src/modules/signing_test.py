@@ -9,6 +9,7 @@ import pytest
 
 import apple_portal
 from config import TEAM_ID
+from modules import signing
 from modules.signing import (
     _profile_entitlements,
     _select_entitlements,
@@ -250,3 +251,93 @@ def test_missing_aps_environment_in_the_profile_still_fails_closed() -> None:
     }
     with pytest.raises(apple_portal.ApplePortalError, match="aps-environment"):
         _select_entitlements(profile, {"aps-environment": "development"})
+
+
+# Exact-identity isolated fixtures; no Apple API or signing command is executed.
+TEAM = "58MF5GATL7"
+APP = "com.darrenoakey.olSudoku"
+EXTENSION = f"{APP}.Widgets"
+
+
+def profile_for(bundle_id: str, *, prefix: str = TEAM, team: str = TEAM) -> tuple[dict, dict]:
+    document = {"ApplicationIdentifierPrefix": [prefix]}
+    entitlements = {
+        "application-identifier": f"{prefix}.{bundle_id}",
+        "com.apple.developer.team-identifier": team,
+        "keychain-access-groups": [f"{prefix}.*", "com.apple.token"],
+        "get-task-allow": False,
+    }
+    return entitlements, document
+
+
+def test_exact_app_and_extension_derive_concrete_identity_and_keychain_group() -> None:
+    for bundle_id in (APP, EXTENSION):
+        profile, document = profile_for(bundle_id)
+        selected = signing._select_entitlements(profile, {}, document, bundle_id)
+        assert selected["application-identifier"] == f"{TEAM}.{bundle_id}"
+        assert selected["com.apple.developer.team-identifier"] == TEAM
+        assert selected["keychain-access-groups"] == [f"{TEAM}.{bundle_id}"]
+        assert all("*" not in str(value) for value in selected.values() if isinstance(value, str))
+        assert all("*" not in item for value in selected.values() if isinstance(value, list) for item in value)
+
+
+def test_legitimate_explicit_exact_claims_are_preserved() -> None:
+    profile, document = profile_for(APP)
+    requested = {
+        "application-identifier": f"$(AppIdentifierPrefix){APP}",
+        "com.apple.developer.team-identifier": TEAM,
+        "keychain-access-groups": [f"$(AppIdentifierPrefix){APP}"],
+    }
+    selected = signing._select_entitlements(profile, requested, document, APP)
+    assert selected["application-identifier"] == f"{TEAM}.{APP}"
+    assert selected["keychain-access-groups"] == [f"{TEAM}.{APP}"]
+
+
+@pytest.mark.parametrize(
+    ("profile_key", "profile_value", "requested", "bundle_id"),
+    [
+        ("application-identifier", f"{TEAM}.com.darrenoakey.other", {}, APP),
+        ("application-identifier", f"{TEAM}.*", {}, APP),
+        ("com.apple.developer.team-identifier", "CROSSTEAM", {}, APP),
+        ("application-identifier", f"{TEAM}.{APP}", {"application-identifier": f"{TEAM}.*"}, APP),
+        ("application-identifier", f"{TEAM}.{APP}", {"keychain-access-groups": [f"{TEAM}.*"]}, APP),
+        ("application-identifier", f"{TEAM}.{APP}", {"keychain-access-groups": ["com.apple.token"]}, APP),
+        ("application-identifier", f"{TEAM}.{APP}", {"keychain-access-groups": [f"{TEAM}.other"]}, APP),
+    ],
+)
+def test_wildcard_cross_target_and_cross_team_claims_fail_closed(
+    profile_key, profile_value, requested, bundle_id
+) -> None:
+    profile, document = profile_for(bundle_id)
+    profile[profile_key] = profile_value
+    with pytest.raises((apple_portal.ApplePortalError, signing.ExactIdentityError)):
+        signing._select_entitlements(profile, requested, document, bundle_id)
+
+
+def test_profile_prefix_must_match_separate_team_claim() -> None:
+    profile, document = profile_for(APP, prefix="CROSSTEAM")
+    with pytest.raises(signing.ExactIdentityError, match="differ"):
+        signing._select_entitlements(profile, {}, document, APP)
+
+
+def test_identity_failure_does_not_force_remint_or_run_signer(tmp_path, monkeypatch) -> None:
+    app = tmp_path / "Sudoku.app"
+    app.mkdir()
+    (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": APP, "CFBundleExecutable": "Sudoku"}))
+    calls = []
+
+    def existing_exact_profile(*args, **kwargs):
+        calls.append((args, kwargs))
+        return b"read-only-profile-fixture"
+
+    monkeypatch.setattr(signing.apple_portal, "ensure_distribution_identity", lambda: None)
+    monkeypatch.setattr(signing.apple_portal, "ensure_profile", existing_exact_profile)
+    monkeypatch.setattr(
+        signing,
+        "_profile_entitlements",
+        lambda *args: (_ for _ in ()).throw(signing.ExactIdentityError("exact identity mismatch")),
+    )
+    monkeypatch.setattr(signing, "_rcodesign_binary", lambda: pytest.fail("signing command must not run"))
+    assert signing.sign_app_bundle(app, APP, "OL Sudoku", "IOS_APP_STORE", requested={APP: {}}) is False
+    assert len(calls) == 1
+    assert "force" not in calls[0][1]

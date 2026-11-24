@@ -153,7 +153,66 @@ def _value_authorized(key: str, requested, authorized) -> bool:
     )
 
 
-def _select_entitlements(profile: dict, requested: dict, document: dict | None = None) -> dict:
+class ExactIdentityError(RuntimeError):
+    """A profile cannot safely represent this concrete target; never re-mint it."""
+
+
+def _exact_identity_error(message: str):
+    error = ExactIdentityError(message)
+    error.__cause__ = apple_portal.ApplePortalError(message)
+    raise error
+
+
+def _profile_team(entitlements: dict, document: dict, bundle_id: str) -> tuple[str, str]:
+    """Bind a signature to its exact target and the profile's actual team."""
+    prefix_values = document.get("ApplicationIdentifierPrefix", [])
+    if not isinstance(prefix_values, list) or len(prefix_values) != 1:
+        _exact_identity_error("provisioning profile has no unambiguous AppIdentifierPrefix")
+    app_prefix = prefix_values[0]
+    team = entitlements.get("com.apple.developer.team-identifier")
+    if not isinstance(app_prefix, str) or not app_prefix or not isinstance(team, str) or not team:
+        _exact_identity_error("provisioning profile has no concrete team entitlement")
+    if app_prefix != team:
+        _exact_identity_error("profile AppIdentifierPrefix and team entitlement differ")
+    expected = f"{app_prefix}.{bundle_id}"
+    application_id = entitlements.get("application-identifier")
+    if application_id != expected:
+        _exact_identity_error(
+            f"profile application-identifier {application_id!r} does not match exact target {expected!r}"
+        )
+    return expected, team
+
+
+def _exact_signature_entitlements(profile: dict, resolved: dict, document: dict, bundle_id: str) -> dict:
+    expected, team = _profile_team(profile, document, bundle_id)
+    selected = {
+        key: value for key, value in profile.items() if key in _SIGNING_IDENTITY_ENTITLEMENTS and key not in resolved
+    }
+    selected.update(resolved)
+    requested_id = resolved.get("application-identifier", expected)
+    requested_team = resolved.get("com.apple.developer.team-identifier", team)
+    if requested_id != expected or requested_team != team:
+        _exact_identity_error("requested app or team entitlement does not match the exact target profile")
+    selected["application-identifier"] = expected
+    selected["com.apple.developer.team-identifier"] = team
+    groups = resolved.get("keychain-access-groups")
+    if groups is None:
+        groups = [expected]
+    elif not isinstance(groups, list) or not groups or not all(isinstance(group, str) for group in groups):
+        _exact_identity_error("keychain-access-groups must contain concrete strings")
+    elif any("*" in group or group == "com.apple.token" for group in groups):
+        _exact_identity_error("wildcard or unsupported token keychain group cannot be signed")
+    elif any(group != expected for group in groups):
+        _exact_identity_error("requested keychain group is not the exact target app group")
+    if not _value_authorized("keychain-access-groups", groups, profile.get("keychain-access-groups")):
+        _exact_identity_error("profile does not authorize exact target keychain group")
+    selected["keychain-access-groups"] = groups
+    return selected
+
+
+def _select_entitlements(
+    profile: dict, requested: dict, document: dict | None = None, bundle_id: str | None = None
+) -> dict:
     resolved = _resolve_profile_variables(requested, document or {})
     # These are decided by the profile, so only require that it grants them at
     # all; the profile's own value is carried into the signature below.
@@ -173,10 +232,12 @@ def _select_entitlements(profile: dict, requested: dict, document: dict | None =
         key: value for key, value in profile.items() if key in _SIGNING_IDENTITY_ENTITLEMENTS and key not in resolved
     }
     selected.update(resolved)
+    if bundle_id is not None:
+        return _exact_signature_entitlements(profile, resolved, document or {}, bundle_id)
     return selected
 
 
-def _profile_entitlements(profile: bytes, requested: dict | None = None) -> bytes:
+def _profile_entitlements(profile: bytes, requested: dict | None = None, bundle_id: str | None = None) -> bytes:
     decoded = subprocess.run(
         [
             "/usr/bin/openssl",
@@ -198,7 +259,7 @@ def _profile_entitlements(profile: bytes, requested: dict | None = None) -> byte
     entitlements = document.get("Entitlements")
     if not isinstance(entitlements, dict):
         raise apple_portal.ApplePortalError("provisioning profile has no entitlements dictionary")
-    selected = _select_entitlements(entitlements, requested or {}, document)
+    selected = _select_entitlements(entitlements, requested or {}, document, bundle_id)
     return plistlib.dumps(selected, fmt=plistlib.FMT_XML)
 
 
@@ -346,6 +407,15 @@ def sign_app_bundle(
             scope = str(bundle.relative_to(app_bundle))
             bundles.append((bundle, str(nested_bundle_id), scope))
 
+        info_path = app_bundle / "Info.plist"
+        if not info_path.is_file():
+            raise apple_portal.ApplePortalError(f"app bundle has no Info.plist: {app_bundle}")
+        actual_identifier = plistlib.loads(info_path.read_bytes()).get("CFBundleIdentifier")
+        if actual_identifier != bundle_id:
+            raise apple_portal.ApplePortalError(
+                f"app package identifier {actual_identifier!r} does not match requested target {bundle_id!r}"
+            )
+
         entitlements_by_scope: list[tuple[str, bytes]] = []
         for bundle, identifier, scope in bundles:
             if identifier not in requested:
@@ -357,7 +427,9 @@ def sign_app_bundle(
                 device_udids=device_udids,
             )
             try:
-                resolved = _profile_entitlements(profile, requested[identifier])
+                resolved = _profile_entitlements(profile, requested[identifier], identifier)
+            except ExactIdentityError:
+                raise
             except apple_portal.ApplePortalError:
                 # A reused profile can predate a capability the App ID now has
                 # (for example PUSH_NOTIFICATIONS), so it cannot authorize what
@@ -370,7 +442,7 @@ def sign_app_bundle(
                     device_udids=device_udids,
                     force=True,
                 )
-                resolved = _profile_entitlements(profile, requested[identifier])
+                resolved = _profile_entitlements(profile, requested[identifier], identifier)
             entitlements_by_scope.append((scope, resolved))
             embedded_profile = bundle / "embedded.mobileprovision"
             embedded_profile.write_bytes(profile)
@@ -427,8 +499,17 @@ def sign_app_bundle(
             raise apple_portal.ApplePortalError(f"codesign entitlements not parseable: {output[:200]}")
         dumped = plistlib.loads(output[xml_start : xml_end + len("</plist>")].encode())
         app_id = dumped.get("application-identifier") if isinstance(dumped, dict) else None
-        if not app_id or not str(app_id).startswith(f"{TEAM_ID}."):
-            raise apple_portal.ApplePortalError("signed app is missing application-identifier entitlement")
+        if app_id != f"{TEAM_ID}.{bundle_id}":
+            raise apple_portal.ApplePortalError("signed app application-identifier does not exactly match its target")
+        if dumped.get("com.apple.developer.team-identifier") != TEAM_ID:
+            raise apple_portal.ApplePortalError("signed app team entitlement does not match the configured team")
+        groups = dumped.get("keychain-access-groups")
+        if (
+            not isinstance(groups, list)
+            or not groups
+            or any(not isinstance(group, str) or "*" in group or group == "com.apple.token" for group in groups)
+        ):
+            raise apple_portal.ApplePortalError("signed app has wildcard or unsupported keychain groups")
         for bundle, _, _ in bundles:
             info_path = bundle / "Info.plist"
             executable_root = bundle
@@ -445,7 +526,7 @@ def sign_app_bundle(
             )
             if ret_code != 0:
                 raise apple_portal.ApplePortalError(f"rcodesign verification failed: {output}")
-    except (apple_portal.ApplePortalError, OSError, subprocess.SubprocessError) as error:
+    except (apple_portal.ApplePortalError, ExactIdentityError, OSError, subprocess.SubprocessError) as error:
         print_error(f"Signing failed: {error}")
         return False
     print_success(f"Signed {app_bundle.name} without macOS Keychain")
